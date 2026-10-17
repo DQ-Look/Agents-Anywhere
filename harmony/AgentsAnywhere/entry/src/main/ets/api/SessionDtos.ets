@@ -1,0 +1,644 @@
+import { objGetArray, objGetBool, objGetNumber, objGetOptNumber, objGetOptString, objGetRecord, objGetString, recordsFromArray, requireRecord } from '../common/Json';
+
+export interface RemoteSession {
+  id: string;
+  connectorId: string;
+  projectId: string | null;
+  connectorStatus: string;
+  runtime: string;
+  externalSessionId: string | null;
+  title: string | null;
+  cwd: string | null;
+  status: string;
+  takeover: boolean;
+  pinned: boolean;
+  pinnedAt: string | null;
+  archived: boolean;
+  archivedAt: string | null;
+  unread: boolean;
+  lastReadSeq: number;
+  lastSyncedAt: string | null;
+  sourceObservedAt: string | null;
+  lastActivityAt: string | null;
+  lastItemAt: string | null;
+  lastItemOrderSeq: number | null;
+  sortAt: string | null;
+  updatedSeq: number;
+  runtimeId: string;
+  runtimeType: string;
+  runtimeName: string;
+}
+
+export interface RemoteSessionResponse {
+  session: RemoteSession;
+  serverTime: string | null;
+}
+
+export interface RemoteSessionPage {
+  sessions: RemoteSession[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  serverTime: string | null;
+}
+
+export interface RemoteSessionsMutationResponse {
+  sessions: RemoteSession[];
+  notFound: string[];
+  serverTime: string | null;
+}
+
+export interface RemoteSessionCreateAndStartRequest {
+  connectorId: string;
+  projectId: string;
+  runtime: string;
+  content: string;
+  title: string | null;
+  cwd: string | null;
+  clientMessageId: string | null;
+}
+
+export interface RemoteSessionCreateResponse {
+  session: RemoteSession;
+}
+
+export interface RemoteSessionTimelinePage {
+  sessionId: string;
+  items: RemoteTimelineItem[];
+  nextSeq: number;
+  hasMore: boolean;
+  serverTime: string | null;
+}
+
+export interface RemoteTimelineItem {
+  id: string;
+  sessionId: string;
+  type: string;
+  status: string;
+  role: string | null;
+  text: string;
+  kind: string | null;
+  clientMessageId: string | null;
+  orderSeq: number;
+  revision: number;
+  updatedSeq: number;
+  createdAt: string;
+  contentHash: string;
+  attachments: RemoteTimelineAttachment[];
+}
+
+export interface RemoteTimelineAttachment {
+  fileId: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  sha256: string | null;
+}
+
+export interface RemoteUploadedAttachment {
+  fileId: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  sha256: string;
+}
+
+export interface RemoteUploadResponse {
+  attachments: RemoteUploadedAttachment[];
+  serverTime: string | null;
+}
+
+export interface RemoteDownloadedAttachment {
+  fileId: string;
+  name: string;
+  size: number;
+  sha256: string;
+  contentBase64: string;
+}
+
+export interface RemoteRuntimeCommand {
+  id: string;
+  title: string;
+  description: string;
+  aliases: string[];
+  category: string | null;
+  scope: string;
+  enabled: boolean;
+  disabledReason: string | null;
+  acceptsArgs: boolean;
+  argsSchemaType: string | null;
+}
+
+export interface RemoteRuntimeCommandList {
+  commands: RemoteRuntimeCommand[];
+  serverTime: string | null;
+}
+
+export interface RemoteCommandResult {
+  ok: boolean;
+  code: string;
+  message: string;
+  executionState: string;
+  text: string | null;
+}
+
+export interface RemoteSessionSnapshot {
+  session: RemoteSession;
+  timelineItems: RemoteTimelineItem[];
+  timelineNextSeq: number;
+  timelineHasMore: boolean;
+  eventCursor: string;
+  serverTime: string | null;
+}
+
+export interface RemoteSessionRuntimeState {
+  sessionId: string;
+  runtime: string;
+  externalSessionId: string | null;
+  status: string;
+  statusReason: string | null;
+  updatedSeq: number;
+  runtimeId: string;
+  runtimeType: string;
+  runtimeName: string;
+}
+
+export interface RemoteSessionRuntimeStateResponse {
+  state: RemoteSessionRuntimeState;
+  serverTime: string | null;
+}
+
+export interface RemoteRpcResponse {
+  ok: boolean;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface RemoteProject {
+  id: string;
+  userId: string;
+  connectorId: string;
+  name: string;
+  workspacePath: string;
+  pinned: boolean;
+  pinnedAt: string | null;
+  manuallyCreated: boolean;
+  activeSessionCount: number;
+  lastActivityAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RemoteProjectListResponse {
+  projects: RemoteProject[];
+  serverTime: string | null;
+}
+
+export interface RemoteProjectResponse {
+  project: RemoteProject;
+  serverTime: string | null;
+}
+
+export interface RemoteSessionEventEnvelope {
+  protocolVersion: string;
+  eventId: string;
+  sequence: number;
+  cursor: string;
+  type: string;
+  sessionId: string;
+  emittedAt: string | null;
+  payload: RemoteSessionEventPayload;
+}
+
+export interface RemoteSessionEventPayload {
+  session: RemoteSession | null;
+  item: RemoteTimelineItem | null;
+  items: RemoteTimelineItem[];
+  state: RemoteSessionRuntimeState | null;
+  eventCursor: string | null;
+}
+
+export function parseRemoteSession(value: Record<string, Object>): RemoteSession {
+  const runtime = objGetOptString(value, 'runtime') ?? objGetOptString(value, 'runtimeType') ?? 'codex';
+  const runtimeType = objGetOptString(value, 'runtimeType') ?? runtime;
+  const runtimeId = objGetOptString(value, 'runtimeId') ?? runtime;
+  const runtimeName = objGetOptString(value, 'runtimeName') ?? objGetOptString(value, 'runtimeDisplayName') ??
+    objGetOptString(value, 'displayName') ?? objGetOptString(value, 'name') ?? runtimeId;
+  return {
+    id: objGetString(value, 'id', ''),
+    connectorId: objGetString(value, 'connectorId', ''),
+    projectId: objGetOptString(value, 'projectId'),
+    connectorStatus: objGetString(value, 'connectorStatus', 'offline'),
+    runtime: runtimeType,
+    externalSessionId: objGetOptString(value, 'externalSessionId'),
+    title: objGetOptString(value, 'title'),
+    cwd: objGetOptString(value, 'cwd'),
+    status: objGetString(value, 'status', 'idle'),
+    takeover: objGetBool(value, 'takeover', false),
+    pinned: objGetBool(value, 'pinned', false),
+    pinnedAt: objGetOptString(value, 'pinnedAt'),
+    archived: objGetBool(value, 'archived', false),
+    archivedAt: objGetOptString(value, 'archivedAt'),
+    unread: objGetBool(value, 'unread', false),
+    lastReadSeq: objGetNumber(value, 'lastReadSeq', 0),
+    lastSyncedAt: objGetOptString(value, 'lastSyncedAt'),
+    sourceObservedAt: objGetOptString(value, 'sourceObservedAt'),
+    lastActivityAt: objGetOptString(value, 'lastActivityAt'),
+    lastItemAt: objGetOptString(value, 'lastItemAt'),
+    lastItemOrderSeq: objGetOptNumber(value, 'lastItemOrderSeq'),
+    sortAt: objGetOptString(value, 'sortAt'),
+    updatedSeq: objGetNumber(value, 'updatedSeq', 0),
+    runtimeId: runtimeId,
+    runtimeType: runtimeType,
+    runtimeName: runtimeName
+  };
+}
+
+export function sessionsFromArray(value: Record<string, Object>): RemoteSession[] {
+  const sessions: RemoteSession[] = [];
+  for (const item of recordsFromArray(objGetArray(value, 'sessions'))) {
+    sessions.push(parseRemoteSession(item));
+  }
+  return sessions;
+}
+
+export function parseRemoteSessionResponse(value: Record<string, Object>): RemoteSessionResponse {
+  return {
+    session: parseRemoteSession(requireRecord(value, 'session')),
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export function parseRemoteSessionPage(value: Record<string, Object>): RemoteSessionPage {
+  return {
+    sessions: sessionsFromArray(value),
+    hasMore: objGetBool(value, 'hasMore', false),
+    nextCursor: objGetOptString(value, 'nextCursor'),
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export function parseRemoteSessionsMutationResponse(value: Record<string, Object>): RemoteSessionsMutationResponse {
+  const notFound: string[] = [];
+  for (const item of objGetArray(value, 'notFound')) {
+    if (typeof item === 'string') {
+      notFound.push(item);
+    }
+  }
+  return {
+    sessions: sessionsFromArray(value),
+    notFound: notFound,
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export function parseRemoteTimelineItem(value: Record<string, Object>): RemoteTimelineItem {
+  const content = objGetRecord(value, 'content');
+  const contentRecord: Record<string, Object> = content === null ? {} : content;
+  const source = objGetRecord(value, 'source');
+  const sourceRecord: Record<string, Object> = source === null ? {} : source;
+  return {
+    id: objGetString(value, 'id', ''),
+    sessionId: objGetString(value, 'sessionId', ''),
+    type: objGetString(value, 'type', 'message'),
+    status: objGetString(value, 'status', 'done'),
+    role: objGetOptString(value, 'role'),
+    text: objGetOptString(contentRecord, 'text') ?? objGetOptString(contentRecord, 'message') ??
+      objGetOptString(contentRecord, 'description') ?? '',
+    kind: objGetOptString(contentRecord, 'kind'),
+    clientMessageId: objGetOptString(sourceRecord, 'clientMessageId'),
+    orderSeq: objGetNumber(value, 'orderSeq', 0),
+    revision: objGetNumber(value, 'revision', 1),
+    updatedSeq: objGetNumber(value, 'updatedSeq', 0),
+    createdAt: objGetString(value, 'createdAt', ''),
+    contentHash: objGetString(value, 'contentHash', ''),
+    attachments: collectTimelineAttachments(contentRecord)
+  };
+}
+
+export function parseRemoteTimelineAttachment(value: Record<string, Object>): RemoteTimelineAttachment | null {
+  const fileId = objGetOptString(value, 'fileId');
+  if (fileId === null) {
+    return null;
+  }
+  return {
+    fileId: fileId,
+    name: objGetString(value, 'name', fileId),
+    mediaType: objGetString(value, 'mediaType', ''),
+    size: objGetNumber(value, 'size', 0),
+    sha256: objGetOptString(value, 'sha256')
+  };
+}
+
+function appendAttachmentRecords(content: Record<string, Object>, attachments: RemoteTimelineAttachment[],
+  seen: Set<string>): void {
+  for (const item of recordsFromArray(objGetArray(content, 'attachments'))) {
+    const attachment = parseRemoteTimelineAttachment(item);
+    if (attachment === null || seen.has(attachment.fileId)) {
+      continue;
+    }
+    seen.add(attachment.fileId);
+    attachments.push(attachment);
+  }
+}
+
+function collectTimelineAttachments(content: Record<string, Object>): RemoteTimelineAttachment[] {
+  const attachments: RemoteTimelineAttachment[] = [];
+  const seen: Set<string> = new Set();
+  appendAttachmentRecords(content, attachments, seen);
+  const nested = objGetRecord(content, 'content');
+  if (nested !== null) {
+    appendAttachmentRecords(nested, attachments, seen);
+  }
+  return attachments;
+}
+
+export function parseRemoteSessionTimelinePage(value: Record<string, Object>): RemoteSessionTimelinePage {
+  const items: RemoteTimelineItem[] = [];
+  for (const item of recordsFromArray(objGetArray(value, 'items'))) {
+    items.push(parseRemoteTimelineItem(item));
+  }
+  return {
+    sessionId: objGetString(value, 'sessionId', ''),
+    items: items,
+    nextSeq: objGetNumber(value, 'nextSeq', 0),
+    hasMore: objGetBool(value, 'hasMore', false),
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export function parseRemoteSessionSnapshot(value: Record<string, Object>): RemoteSessionSnapshot {
+  const timeline = objGetRecord(value, 'timeline');
+  const timelineRecord: Record<string, Object> = timeline === null ? {} : timeline;
+  const items: RemoteTimelineItem[] = [];
+  for (const item of recordsFromArray(objGetArray(timelineRecord, 'items'))) {
+    items.push(parseRemoteTimelineItem(item));
+  }
+  return {
+    session: parseRemoteSession(requireRecord(value, 'session')),
+    timelineItems: items,
+    timelineNextSeq: objGetNumber(timelineRecord, 'nextSeq', 0),
+    timelineHasMore: objGetBool(timelineRecord, 'hasMore', false),
+    eventCursor: objGetString(value, 'eventCursor', 'seq:0'),
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export function parseRemoteSessionRuntimeState(value: Record<string, Object>): RemoteSessionRuntimeState {
+  const runtime = objGetOptString(value, 'runtime') ?? objGetOptString(value, 'runtimeType') ?? '';
+  const runtimeType = objGetOptString(value, 'runtimeType') ?? runtime;
+  const runtimeId = objGetOptString(value, 'runtimeId') ?? runtime;
+  const runtimeName = objGetOptString(value, 'runtimeName') ?? objGetOptString(value, 'runtimeDisplayName') ??
+    objGetOptString(value, 'displayName') ?? objGetOptString(value, 'name') ?? runtimeId;
+  return {
+    sessionId: objGetString(value, 'sessionId', ''),
+    runtime: runtimeType,
+    externalSessionId: objGetOptString(value, 'externalSessionId'),
+    status: objGetString(value, 'status', 'unknown'),
+    statusReason: objGetOptString(value, 'statusReason'),
+    updatedSeq: objGetNumber(value, 'updatedSeq', 0),
+    runtimeId: runtimeId,
+    runtimeType: runtimeType,
+    runtimeName: runtimeName
+  };
+}
+
+export function parseRemoteSessionRuntimeStateResponse(value: Record<string, Object>): RemoteSessionRuntimeStateResponse {
+  return {
+    state: parseRemoteSessionRuntimeState(requireRecord(value, 'state')),
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export function parseRemoteRpcResponse(value: Record<string, Object>): RemoteRpcResponse {
+  const error = objGetRecord(value, 'error');
+  return {
+    ok: objGetBool(value, 'ok', false),
+    errorCode: error === null ? null : objGetOptString(error, 'code'),
+    errorMessage: error === null ? null : objGetOptString(error, 'message')
+  };
+}
+
+export function parseRemoteProject(value: Record<string, Object>): RemoteProject {
+  return {
+    id: objGetString(value, 'id', ''),
+    userId: objGetString(value, 'userId', ''),
+    connectorId: objGetString(value, 'connectorId', ''),
+    name: objGetString(value, 'name', ''),
+    workspacePath: objGetString(value, 'workspacePath', ''),
+    pinned: objGetBool(value, 'pinned', false),
+    pinnedAt: objGetOptString(value, 'pinnedAt'),
+    manuallyCreated: objGetBool(value, 'manuallyCreated', false),
+    activeSessionCount: objGetNumber(value, 'activeSessionCount', 0),
+    lastActivityAt: objGetOptString(value, 'lastActivityAt'),
+    createdAt: objGetString(value, 'createdAt', ''),
+    updatedAt: objGetString(value, 'updatedAt', '')
+  };
+}
+
+export function parseRemoteProjectListResponse(value: Record<string, Object>): RemoteProjectListResponse {
+  const projects: RemoteProject[] = [];
+  for (const item of recordsFromArray(objGetArray(value, 'projects'))) {
+    projects.push(parseRemoteProject(item));
+  }
+  return {
+    projects: projects,
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export interface RemoteNoticeAction {
+  actionId: string;
+  label: string;
+  style: string;
+}
+
+export interface RemoteRuntimeNotice {
+  noticeId: string;
+  sessionId: string;
+  type: string;
+  title: string;
+  message: string | null;
+  severity: string;
+  status: string;
+  interactionType: string | null;
+  responseRequired: boolean;
+  actions: RemoteNoticeAction[];
+  revision: number;
+  updatedSeq: number;
+  createdAt: string | null;
+}
+
+export interface RemoteRuntimeNoticeList {
+  notices: RemoteRuntimeNotice[];
+  serverTime: string | null;
+}
+
+export function parseRemoteNoticeAction(value: Record<string, Object>): RemoteNoticeAction {
+  const action: RemoteNoticeAction = {
+    actionId: objGetString(value, 'actionId', ''),
+    label: objGetString(value, 'label', ''),
+    style: objGetString(value, 'style', 'secondary')
+  };
+  return action;
+}
+
+export function parseRemoteRuntimeNotice(value: Record<string, Object>): RemoteRuntimeNotice {
+  const actions: RemoteNoticeAction[] = [];
+  for (const actionValue of recordsFromArray(objGetArray(value, 'actions'))) {
+    actions.push(parseRemoteNoticeAction(actionValue));
+  }
+  const notice: RemoteRuntimeNotice = {
+    noticeId: objGetString(value, 'noticeId', objGetString(value, 'id', '')),
+    sessionId: objGetString(value, 'sessionId', ''),
+    type: objGetString(value, 'type', 'notification'),
+    title: objGetString(value, 'title', ''),
+    message: objGetOptString(value, 'message'),
+    severity: objGetString(value, 'severity', 'info'),
+    status: objGetString(value, 'status', 'open'),
+    interactionType: objGetOptString(value, 'interactionType'),
+    responseRequired: objGetBool(value, 'responseRequired', false),
+    actions: actions,
+    revision: objGetNumber(value, 'revision', 1),
+    updatedSeq: objGetNumber(value, 'updatedSeq', 0),
+    createdAt: objGetOptString(value, 'createdAt'),
+  };
+  return notice;
+}
+
+export function parseRemoteRuntimeNoticeList(value: Record<string, Object>): RemoteRuntimeNoticeList {
+  const notices: RemoteRuntimeNotice[] = [];
+  for (const noticeValue of recordsFromArray(objGetArray(value, 'notices'))) {
+    notices.push(parseRemoteRuntimeNotice(noticeValue));
+  }
+  const list: RemoteRuntimeNoticeList = {
+    notices: notices,
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+  return list;
+}
+
+export function parseSessionEventEnvelope(value: Record<string, Object>): RemoteSessionEventEnvelope {
+  const payloadValue = objGetRecord(value, 'payload');
+  const payload: Record<string, Object> = payloadValue === null ? {} : payloadValue;
+  const sessionValue = objGetRecord(payload, 'session');
+  const stateValue = objGetRecord(payload, 'state');
+  const itemValue = objGetRecord(payload, 'item');
+  const items: RemoteTimelineItem[] = [];
+  for (const entry of recordsFromArray(objGetArray(payload, 'items'))) {
+    items.push(parseRemoteTimelineItem(entry));
+  }
+  const eventPayload: RemoteSessionEventPayload = {
+    session: sessionValue === null ? null : parseRemoteSession(sessionValue),
+    item: itemValue === null ? null : parseRemoteTimelineItem(itemValue),
+    items: items,
+    state: stateValue === null ? null : parseRemoteSessionRuntimeState(stateValue),
+    eventCursor: objGetOptString(payload, 'eventCursor')
+  };
+  return {
+    protocolVersion: objGetString(value, 'protocolVersion', ''),
+    eventId: objGetString(value, 'eventId', ''),
+    sequence: objGetNumber(value, 'sequence', 0),
+    cursor: objGetString(value, 'cursor', ''),
+    type: objGetString(value, 'type', ''),
+    sessionId: objGetString(value, 'sessionId', ''),
+    emittedAt: objGetOptString(value, 'emittedAt'),
+    payload: eventPayload
+  };
+}
+
+export function parseRemoteUploadedAttachment(value: Record<string, Object>): RemoteUploadedAttachment {
+  return {
+    fileId: objGetString(value, 'fileId', ''),
+    name: objGetString(value, 'name', ''),
+    mediaType: objGetString(value, 'mediaType', 'application/octet-stream'),
+    size: objGetNumber(value, 'size', 0),
+    sha256: objGetString(value, 'sha256', '')
+  };
+}
+
+export function parseRemoteUploadResponse(value: Record<string, Object>): RemoteUploadResponse {
+  const attachments: RemoteUploadedAttachment[] = [];
+  for (const item of recordsFromArray(objGetArray(value, 'attachments'))) {
+    attachments.push(parseRemoteUploadedAttachment(item));
+  }
+  return {
+    attachments: attachments,
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export function parseRemoteDownloadedAttachment(value: Record<string, Object>): RemoteDownloadedAttachment {
+  return {
+    fileId: objGetString(value, 'fileId', ''),
+    name: objGetString(value, 'name', ''),
+    size: objGetNumber(value, 'size', 0),
+    sha256: objGetString(value, 'sha256', ''),
+    contentBase64: objGetString(value, 'contentBase64', '')
+  };
+}
+
+export function parseRemoteRuntimeCommand(value: Record<string, Object>): RemoteRuntimeCommand {
+  const aliases: string[] = [];
+  for (const alias of objGetArray(value, 'aliases')) {
+    if (typeof alias === 'string' && alias.length > 0) {
+      aliases.push(alias);
+    }
+  }
+  const argsSchema = objGetRecord(value, 'argsSchema');
+  return {
+    id: objGetString(value, 'id', ''),
+    title: objGetString(value, 'title', objGetString(value, 'id', '')),
+    description: objGetString(value, 'description', ''),
+    aliases: aliases,
+    category: objGetOptString(value, 'category'),
+    scope: objGetString(value, 'scope', 'session'),
+    enabled: objGetBool(value, 'enabled', true),
+    disabledReason: objGetOptString(value, 'disabledReason'),
+    acceptsArgs: objGetBool(value, 'acceptsArgs', false),
+    argsSchemaType: argsSchema === null ? null : objGetOptString(argsSchema, 'type')
+  };
+}
+
+export function parseRemoteRuntimeCommandList(value: Record<string, Object>): RemoteRuntimeCommandList {
+  const commands: RemoteRuntimeCommand[] = [];
+  for (const item of recordsFromArray(objGetArray(value, 'commands'))) {
+    commands.push(parseRemoteRuntimeCommand(item));
+  }
+  return {
+    commands: commands,
+    serverTime: objGetOptString(value, 'serverTime')
+  };
+}
+
+export function parseRemoteCommandResult(value: Record<string, Object>): RemoteCommandResult {
+  const resultRecord = objGetRecord(value, 'result');
+  const result: Record<string, Object> = resultRecord === null ? {} : resultRecord;
+  const rawOk = objGetBool(value, 'ok', false);
+  const code = objGetString(value, 'code', '');
+  const message = objGetString(value, 'message', '');
+  const text = objGetOptString(result, 'text');
+  const stateValue = objGetOptString(result, 'executionState');
+  let state: string;
+  if (stateValue === 'accepted' || stateValue === 'completed' || stateValue === 'unknown') {
+    state = stateValue;
+  } else if (code === 'command_outcome_unknown') {
+    state = 'unknown';
+  } else if (rawOk) {
+    state = 'accepted';
+  } else {
+    state = 'completed';
+  }
+  let resolvedMessage: string;
+  if (rawOk) {
+    resolvedMessage = text === null ? message : text;
+  } else {
+    resolvedMessage = message.length > 0 ? message : (text === null ? '' : text);
+  }
+  return {
+    ok: rawOk && state !== 'unknown',
+    code: code,
+    message: resolvedMessage,
+    executionState: state,
+    text: text
+  };
+}

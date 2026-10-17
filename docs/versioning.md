@@ -56,6 +56,7 @@ Agents Anywhere 的产品版本使用 `MAJOR.MINOR.PATCH`，三段各有明确�
 | Desktop | `desktop-workbench/package.json`、`desktop-workbench/renderer/package.json` | `version` |
 | Android | `android/app/build.gradle.kts` | `versionName`、`versionCode` |
 | iOS | `ios/Agents Anywhere/Agents Anywhere.xcodeproj/project.pbxproj` | `MARKETING_VERSION` |
+| 鸿蒙 | `harmony/AgentsAnywhere/AppScope/app.json5` | `versionName`、`versionCode` |
 | Web | `web-next/package.json` | `version`（`src/lib/demo-api.ts` 中的演示版本号也要同步） |
 | Connector | `connector/pyproject.toml` | `version` |
 | DSH 插件 | `dsh-bridge-next/package.json` | `version` |

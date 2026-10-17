@@ -1,0 +1,29 @@
+{
+  "routerMap": [
+    {
+      "name": "session_detail",
+      "pageSourceFile": "src/main/ets/pages/SessionDetailPage.ets",
+      "buildFunction": "SessionDetailPageBuilder"
+    },
+    {
+      "name": "devices",
+      "pageSourceFile": "src/main/ets/pages/DevicesPage.ets",
+      "buildFunction": "DevicesPageBuilder"
+    },
+    {
+      "name": "terminal",
+      "pageSourceFile": "src/main/ets/pages/TerminalPage.ets",
+      "buildFunction": "TerminalPageBuilder"
+    },
+    {
+      "name": "files",
+      "pageSourceFile": "src/main/ets/pages/FilesPage.ets",
+      "buildFunction": "FilesPageBuilder"
+    },
+    {
+      "name": "profile",
+      "pageSourceFile": "src/main/ets/pages/ProfilePage.ets",
+      "buildFunction": "ProfilePageBuilder"
+    }
+  ]
+}
