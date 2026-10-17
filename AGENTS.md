@@ -16,6 +16,7 @@ Agents Anywhere 是一个跨设备的 Agent 工作台。工作设备上的 **Con
 | `desktop-workbench/` | **当前**桌面客户端，内含受管理的本机 Connector | Electron、TypeScript、Yarn |
 | `android/` | Android 客户端，见 `android/ARCHITECTURE.md` | Kotlin、Gradle、JDK 17 |
 | `ios/` | iOS / iPadOS 客户端，见 `ios/ARCHITECTURE.md` | Swift、Xcode |
+| `harmony/` | 鸿蒙（HarmonyOS / ArkTS）客户端，工程在 `harmony/AgentsAnywhere`（bundle `com.agentsanywhere.app`，API 26） | ArkTS、DevEco Studio / devecocli |
 | `dsh-bridge-next/` | **当前** DSH 插件（npm 包，也随 DSH Desktop 分发） | TypeScript、Yarn |
 | `contracts/` | 跨端契约与 fixtures，按 `<name>/<version>/` 组织 | JSON Schema / 文档 |
 | `docker/` | 自托管部署与本地数据库 compose | Docker Compose |
@@ -58,7 +59,7 @@ Agents Anywhere 是一个跨设备的 Agent 工作台。工作设备上的 **Con
 
 ## 提交与 PR
 
-- 从最新的 `main` 创建分支，分支名为 `<type>/<domain>/<topic>`：type 与提交信息的类型一致（`feat`、`fix`、`docs`、`chore`、`refactor` 等）；domain 用缩写：`fe`（Web）、`be`（Server）、`con`（Connector）、`dsk`（Desktop）、`apk`（Android）、`ios`、`dsh`、`docs`，同时涉及多个 domain 时用 `+` 连接。例如 `feat/con/codex-ipc-takeover`、`fix/ios/testflight-entry`、`feat/con+be/runtime-phase`。
+- 从最新的 `main` 创建分支，分支名为 `<type>/<domain>/<topic>`：type 与提交信息的类型一致（`feat`、`fix`、`docs`、`chore`、`refactor` 等）；domain 用缩写：`fe`（Web）、`be`（Server）、`con`（Connector）、`dsk`（Desktop）、`apk`（Android）、`ios`、`hmo`（鸿蒙 / HarmonyOS）、`dsh`、`docs`，同时涉及多个 domain 时用 `+` 连接。例如 `feat/con/codex-ipc-takeover`、`fix/ios/testflight-entry`、`feat/con+be/runtime-phase`。
 - 提交信息使用 Conventional Commits，并带上作用域，例如 `fix(dsh): ...`、`feat(android): ...`、`docs(ios): ...`。正文可以用中文或英文。
 - 一个 PR 只做一件事。不要顺手提交与任务无关的本地改动、部署检查点或调试产物（`.local-dev/`、截图、日志）。
 - 不要提交凭据、签名证书、`.env` 文件或生产地址中的密钥。签名、公证和发布流程见各子项目的 README。
