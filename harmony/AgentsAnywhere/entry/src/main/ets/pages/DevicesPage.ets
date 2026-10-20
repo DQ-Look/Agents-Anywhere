@@ -579,7 +579,10 @@ export struct DevicesPage {
                       } else {
                         ForEach(this.runtimes, (runtime: RemoteDeviceRuntime) => {
                           this.runtimeRow(runtime)
-                        }, (runtime: RemoteDeviceRuntime) => runtime.runtimeId)
+                        // Key includes displayed state so activate/deactivate
+                        // or reloaded runtime data rebuilds the row.
+                        }, (runtime: RemoteDeviceRuntime) =>
+                          `${runtime.runtimeId}_${runtime.displayName}_${runtime.status}_${runtime.active ? 1 : 0}_${runtime.present ? 1 : 0}_${runtime.configured ? 1 : 0}`)
                       }
                       if (this.discovering) {
                         Row({ space: 8 }) {
@@ -689,7 +692,11 @@ export struct DevicesPage {
                   .backgroundColor(getColors().raisedSurface)
                   .border({ width: 1, color: getColors().border })
                 }
-              }, (device: RemoteDevice) => device.id)
+              // Key includes displayed fields so replacing an item (rename,
+              // refresh) rebuilds the row; a plain device.id key would keep
+              // the stale row until the page is re-entered.
+              }, (device: RemoteDevice) =>
+                `${device.id}_${device.name}_${device.status}_${device.deviceOs ?? ''}_${device.lastSeenAt ?? ''}`)
             }
             .width('100%')
             .layoutWeight(1)
