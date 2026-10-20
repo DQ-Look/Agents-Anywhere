@@ -45,4 +45,19 @@ docs/reference/*
 
 _reference/*
 !_reference/httpx-s3-client/
-!_reference/httpx-s3-client/**
+!_reference/httpx-s3-client/**/
+
+# HarmonyOS / DevEco Studio
+.deveco/
+.build-log/
+.hvigor/
+.hvigorw
+*.profraw
+
+# JetBrains IDEs
+.idea/
+*.iml
+
+# Build outputs and logs
+build_log.txt
+*.log
