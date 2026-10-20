@@ -432,6 +432,7 @@
     { "name": "archive_more_hint", "value": "继续加载，查看更早的归档会话。" },
     { "name": "archive_more_failed", "value": "暂时无法加载更多会话" },
     { "name": "archive_project_empty", "value": "这个项目还没有归档会话" },
-    { "name": "archive_archived_at", "value": "归档于 %s" }
+    { "name": "archive_archived_at", "value": "归档于 %s" },
+    { "name": "gesture_detection_reason", "value": "识别握持设备的手，让新建会话按钮保持在拇指易触及的位置。" }
   ]
 }

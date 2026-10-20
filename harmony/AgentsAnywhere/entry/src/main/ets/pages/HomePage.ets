@@ -1,7 +1,9 @@
 import { fileIo, picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { vibrator } from '@kit.SensorServiceKit';
-import { componentUtils } from '@kit.ArkUI';
+import { componentUtils, curves } from '@kit.ArkUI';
+import { motion } from '@kit.MultimodalAwarenessKit';
+import { Callback } from '@kit.BasicServicesKit';
 import { ApiClient } from '../api/ApiClient';
 import { SessionsApi } from '../api/SessionsApi';
 import {
@@ -380,6 +382,19 @@ export struct HomePage {
   @State filterAnchor: HomeMenuAnchor = { x: 0, y: 0, width: 0, height: 0 };
   @State filterAgents: string[] = [];
   @State filterDevices: HomeFilterDeviceOption[] = [];
+  // Smart reach (智感握姿): the home FAB follows the holding hand so it stays
+  // within thumb reach; defaults to the right side when unsupported.
+  @State fabOnRight: boolean = true;
+  @State fabHasAppeared: boolean = false;
+  private holdingHandSubscribed: boolean = false;
+  private holdingHandCallback: Callback<motion.HoldingHandStatus> =
+    (status: motion.HoldingHandStatus): void => {
+      if (status === motion.HoldingHandStatus.LEFT_HAND_HELD) {
+        this.fabOnRight = false;
+      } else if (status === motion.HoldingHandStatus.RIGHT_HAND_HELD) {
+        this.fabOnRight = true;
+      }
+    };
   @State projectActionMenuId: string = '';
   @State projectActionMenuAnchored: boolean = true;
   @State projectActionAnchor: HomeMenuAnchor = { x: 0, y: 0, width: 0, height: 0 };
@@ -462,6 +477,7 @@ export struct HomePage {
     });
     this.loadSessions();
     this.connectDashboard();
+    this.subscribeHoldingHand();
   }
 
   aboutToDisappear(): void {
@@ -471,6 +487,33 @@ export struct HomePage {
       this.retryTimer = -1;
     }
     this.socket.destroy();
+    this.unsubscribeHoldingHand();
+  }
+
+  private subscribeHoldingHand(): void {
+    if (!canIUse('SystemCapability.MultimodalAwareness.Motion')) {
+      return;
+    }
+    try {
+      motion.on('holdingHandChanged', this.holdingHandCallback);
+      this.holdingHandSubscribed = true;
+    } catch (error) {
+      hilog.warn(0x0000, LOG_TAG, `holding hand subscribe failed err=%{public}s`,
+        errorMessageFrom(error));
+    }
+  }
+
+  private unsubscribeHoldingHand(): void {
+    if (!this.holdingHandSubscribed) {
+      return;
+    }
+    this.holdingHandSubscribed = false;
+    try {
+      motion.off('holdingHandChanged', this.holdingHandCallback);
+    } catch (error) {
+      hilog.warn(0x0000, LOG_TAG, `holding hand unsubscribe failed err=%{public}s`,
+        errorMessageFrom(error));
+    }
   }
 
   // NewProjectPage bumps the AppStorage tick after creating a project.
@@ -3022,20 +3065,55 @@ export struct HomePage {
 
   @Builder
   homeFab() {
-    Button() {
-      SymbolGlyph($r('sys.symbol.plus'))
-        .fontSize(24)
-        .fontColor([getColors().onPrimaryAction])
+    // Smart reach (智感握姿): the FAB follows the holding hand. The wrapper is
+    // transparent to touches so the list beneath keeps receiving gestures.
+    Stack({ alignContent: this.fabOnRight ? Alignment.BottomEnd : Alignment.BottomStart }) {
+      if (this.fabOnRight) {
+        Button() {
+          SymbolGlyph($r('sys.symbol.plus'))
+            .fontSize(24)
+            .fontColor([getColors().onPrimaryAction])
+        }
+        .width(54)
+        .height(54)
+        .borderRadius(27)
+        .padding(0)
+        .backgroundColor(getColors().primaryAction)
+        .margin({ right: 18, bottom: 32 })
+        .transition(TransitionEffect.move(TransitionEdge.END)
+          .animation({ curve: this.fabHasAppeared
+            ? curves.interpolatingSpring(0, 1, 170, 17)
+            : curves.interpolatingSpring(0, 1, 200, 17) }))
+        .onAppear(() => {
+          this.fabHasAppeared = true;
+        })
+        .accessibilityText($r('app.string.home_new_session'))
+        .onClick(() => {
+          this.openNewSession();
+        })
+      } else {
+        Button() {
+          SymbolGlyph($r('sys.symbol.plus'))
+            .fontSize(24)
+            .fontColor([getColors().onPrimaryAction])
+        }
+        .width(54)
+        .height(54)
+        .borderRadius(27)
+        .padding(0)
+        .backgroundColor(getColors().primaryAction)
+        .margin({ left: 18, bottom: 32 })
+        .transition(TransitionEffect.move(TransitionEdge.START)
+          .animation({ curve: curves.interpolatingSpring(0, 1, 170, 17) }))
+        .accessibilityText($r('app.string.home_new_session'))
+        .onClick(() => {
+          this.openNewSession();
+        })
+      }
     }
-    .width(54)
-    .height(54)
-    .borderRadius(27)
-    .padding(0)
-    .backgroundColor(getColors().primaryAction)
-    .margin({ right: 18, bottom: 32 })
-    .onClick(() => {
-      this.openNewSession();
-    })
+    .width('100%')
+    .height('100%')
+    .hitTestBehavior(HitTestMode.Transparent)
   }
 
   // Section header of the pinned/projects sections, mirroring Android
