@@ -432,6 +432,7 @@
     { "name": "archive_more_hint", "value": "Load more to see earlier archived sessions." },
     { "name": "archive_more_failed", "value": "Could not load more sessions" },
     { "name": "archive_project_empty", "value": "No archived sessions in this project" },
-    { "name": "archive_archived_at", "value": "Archived %s" }
+    { "name": "archive_archived_at", "value": "Archived %s" },
+    { "name": "gesture_detection_reason", "value": "Detects which hand holds the device so the new session button stays within thumb reach." }
   ]
 }
