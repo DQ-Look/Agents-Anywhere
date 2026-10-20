@@ -16,6 +16,7 @@ export interface AuthMeResponse {
   emailVerified: boolean;
   role: string;
   disabled: boolean;
+  avatar: string | null;
   serverTime: string;
 }
 
@@ -37,3 +38,8 @@ export interface OAuthTokenResponse {
   scope: string;
   refreshToken: string | null;
 }
+
+// Mobile-login DTOs for the HarmonyOS client live in AuthApi.ets
+// (MobileLoginStatus / MobileLoginExchange); the scanned QR payload model lives
+// in auth/MobileLoginQrPayload.ets. The login flow in LoginPage.ets consumes
+// those via AuthApi.

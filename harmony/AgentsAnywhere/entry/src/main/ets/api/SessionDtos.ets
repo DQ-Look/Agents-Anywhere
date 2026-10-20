@@ -1,4 +1,6 @@
-import { objGetArray, objGetBool, objGetNumber, objGetOptNumber, objGetOptString, objGetRecord, objGetString, recordsFromArray, requireRecord } from '../common/Json';
+import { util } from '@kit.ArkTS';
+import { cryptoFramework } from '@kit.CryptoArchitectureKit';
+import { objGetArray, objGetBool, objGetNumber, objGetOptNumber, objGetOptString, objGetRecord, objGetString, recordOrNull, recordsFromArray, requireRecord } from '../common/Json';
 
 export interface RemoteSession {
   id: string;
@@ -47,14 +49,59 @@ export interface RemoteSessionsMutationResponse {
   serverTime: string | null;
 }
 
+// Runtime selections sent with create-and-start. Mirrors Android
+// NewSessionSelections: only non-blank values are forwarded to the server.
+export interface RemoteSessionSelections {
+  model: string | null;
+  permission: string | null;
+}
+
+// An inline attachment embedded in the create-and-start request. Mirrors
+// Android RemoteInlineAttachmentRef / server InlineAttachmentRef: the payload
+// travels base64-encoded inside the request, no separate upload is needed.
+export interface RemoteInlineAttachmentRef {
+  fileId: string;
+  name: string;
+  mediaType: string;
+  size: number;
+  sha256: string;
+  contentBase64: string;
+}
+
 export interface RemoteSessionCreateAndStartRequest {
   connectorId: string;
   projectId: string;
   runtime: string;
+  runtimeId: string | null;
   content: string;
   title: string | null;
   cwd: string | null;
+  selections: RemoteSessionSelections;
+  attachments: RemoteInlineAttachmentRef[];
   clientMessageId: string | null;
+}
+
+// Mirrors Android NewSessionAttachmentPart.toInlineAttachmentRef: the SHA-256
+// hex digest doubles as the file id and the bytes are embedded as base64.
+export async function buildRemoteInlineAttachmentRef(name: string, mediaType: string,
+  bytes: Uint8Array): Promise<RemoteInlineAttachmentRef> {
+  const md = cryptoFramework.createMd('SHA256');
+  await md.update({ data: bytes });
+  const digest = await md.digest();
+  let sha256 = '';
+  for (let index = 0; index < digest.data.length; index++) {
+    const byte = digest.data[index];
+    sha256 += byte < 16 ? `0${byte.toString(16)}` : byte.toString(16);
+  }
+  const ref: RemoteInlineAttachmentRef = {
+    fileId: sha256,
+    name: name,
+    mediaType: mediaType.length > 0 ? mediaType : 'application/octet-stream',
+    size: bytes.length,
+    sha256: sha256,
+    contentBase64: new util.Base64Helper().encodeToStringSync(bytes)
+  };
+  return ref;
 }
 
 export interface RemoteSessionCreateResponse {
@@ -446,10 +493,17 @@ export function parseRemoteProjectListResponse(value: Record<string, Object>): R
   };
 }
 
+export interface RemoteNoticeActionInput {
+  required: boolean;
+  schema: Record<string, Object> | null;
+  uiSchema: Record<string, Object> | null;
+}
+
 export interface RemoteNoticeAction {
   actionId: string;
   label: string;
   style: string;
+  input: RemoteNoticeActionInput | null;
 }
 
 export interface RemoteRuntimeNotice {
@@ -477,9 +531,26 @@ export function parseRemoteNoticeAction(value: Record<string, Object>): RemoteNo
   const action: RemoteNoticeAction = {
     actionId: objGetString(value, 'actionId', ''),
     label: objGetString(value, 'label', ''),
-    style: objGetString(value, 'style', 'secondary')
+    style: objGetString(value, 'style', 'secondary'),
+    input: parseRemoteNoticeActionInput(value)
   };
   return action;
+}
+
+export function parseRemoteNoticeActionInput(value: Record<string, Object>): RemoteNoticeActionInput | null {
+  const input = value['input'];
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
+    return null;
+  }
+  const inputRecord = input as Record<string, Object>;
+  const schema = inputRecord['schema'];
+  const uiSchema = inputRecord['uiSchema'];
+  const result: RemoteNoticeActionInput = {
+    required: objGetBool(inputRecord, 'required', false),
+    schema: recordOrNull(schema),
+    uiSchema: recordOrNull(uiSchema)
+  };
+  return result;
 }
 
 export function parseRemoteRuntimeNotice(value: Record<string, Object>): RemoteRuntimeNotice {
@@ -641,4 +712,65 @@ export function parseRemoteCommandResult(value: Record<string, Object>): RemoteC
     executionState: state,
     text: text
   };
+}
+
+export interface RemoteRuntimeCapability {
+  capabilityId: string;
+  scope: string;
+  runtime: string;
+  supported: boolean;
+  available: boolean;
+  allowed: boolean;
+}
+
+export interface RemoteRuntimeCapabilitySet {
+  runtime: string;
+  revision: number;
+  capabilities: RemoteRuntimeCapability[];
+}
+
+export interface RemoteSessionShareResponse {
+  shareUrl: string;
+}
+
+export function parseRemoteRuntimeCapability(source: Record<string, Object>): RemoteRuntimeCapability {
+  return {
+    capabilityId: objGetString(source, 'capabilityId', ''),
+    scope: objGetString(source, 'scope', ''),
+    runtime: objGetString(source, 'runtime', ''),
+    supported: objGetBool(source, 'supported', false),
+    available: objGetBool(source, 'available', false),
+    allowed: objGetBool(source, 'allowed', false)
+  };
+}
+
+export function parseRemoteRuntimeCapabilitySet(source: Record<string, Object>): RemoteRuntimeCapabilitySet {
+  const list: RemoteRuntimeCapability[] = [];
+  const rawList = objGetArray(source, 'capabilities');
+  for (const raw of rawList) {
+    const record = recordOrNull(raw);
+    if (record !== null) {
+      list.push(parseRemoteRuntimeCapability(record));
+    }
+  }
+  return {
+    runtime: objGetString(source, 'runtime', ''),
+    revision: objGetNumber(source, 'revision', 0),
+    capabilities: list
+  };
+}
+
+export function hasCapability(set: RemoteRuntimeCapabilitySet | null, capabilityId: string): boolean {
+  if (set === null) {
+    return false;
+  }
+  // Mirrors Android EffectiveCapability.usable: a capability is only usable
+  // when it is supported, available and allowed.
+  for (const capability of set.capabilities) {
+    if (capability.capabilityId === capabilityId && capability.supported &&
+      capability.available && capability.allowed) {
+      return true;
+    }
+  }
+  return false;
 }

@@ -1,5 +1,5 @@
 import { ApiClient, FetchedFileData, UploadFilePart } from './ApiClient';
-import { objGetArray, recordsFromArray, requireRecord } from '../common/Json';
+import { objGetArray, objGetString, recordsFromArray, requireRecord } from '../common/Json';
 import { ApiException } from '../common/ApiException';
 import {
   parseRemoteCommandResult,
@@ -17,6 +17,7 @@ import {
   parseRemoteSessionTimelinePage,
   parseRemoteSessionsMutationResponse,
   parseRemoteUploadResponse,
+  parseRemoteRuntimeCapabilitySet,
   RemoteCommandResult,
   RemoteDownloadedAttachment,
   RemoteProject,
@@ -33,6 +34,8 @@ import {
   RemoteSessionSnapshot,
   RemoteSessionTimelinePage,
   RemoteSessionsMutationResponse,
+  RemoteSessionShareResponse,
+  RemoteRuntimeCapabilitySet,
   RemoteUploadResponse
 } from './SessionDtos';
 
@@ -120,6 +123,21 @@ export class SessionsApi {
     return project;
   }
 
+  async updateProject(serverUrl: string, authorizationToken: string, projectId: string,
+    name: string | null, pinned: boolean | null): Promise<RemoteProject> {
+    const body: Record<string, Object> = {};
+    if (name !== null) {
+      body['name'] = name;
+    }
+    if (pinned !== null) {
+      body['pinned'] = pinned;
+    }
+    const response = await this.client.patchJson(serverUrl,
+      `/projects/${encodeURIComponent(projectId)}`, body, authorizationToken);
+    const projectRecord = requireRecord(response, 'project');
+    return parseRemoteProject(projectRecord);
+  }
+
   async createAndStartSession(serverUrl: string, authorizationToken: string,
     request: RemoteSessionCreateAndStartRequest): Promise<RemoteSessionCreateResponse> {
     const body: Record<string, Object> = {
@@ -128,11 +146,47 @@ export class SessionsApi {
       'runtime': request.runtime,
       'content': request.content
     };
+    if (request.runtimeId !== null && request.runtimeId.length > 0 && request.runtimeId !== request.runtime) {
+      body['runtimeId'] = request.runtimeId;
+    }
     if (request.title !== null) {
       body['title'] = request.title;
     }
     if (request.cwd !== null) {
       body['cwd'] = request.cwd;
+    }
+    // Mirrors Android SessionsApi.createAndStartSession: only non-blank
+    // selection values are forwarded and the field is omitted when empty.
+    const selections: Record<string, Object> = {};
+    let hasSelections = false;
+    const model = request.selections.model;
+    if (model !== null && model.length > 0) {
+      selections['model'] = model;
+      hasSelections = true;
+    }
+    const permission = request.selections.permission;
+    if (permission !== null && permission.length > 0) {
+      selections['permission'] = permission;
+      hasSelections = true;
+    }
+    if (hasSelections) {
+      body['selections'] = selections;
+    }
+    // Inline attachments: the server persists the base64 payloads itself.
+    if (request.attachments.length > 0) {
+      const attachments: Record<string, Object>[] = [];
+      for (const attachment of request.attachments) {
+        const ref: Record<string, Object> = {
+          'fileId': attachment.fileId,
+          'name': attachment.name,
+          'mediaType': attachment.mediaType,
+          'size': attachment.size,
+          'sha256': attachment.sha256,
+          'contentBase64': attachment.contentBase64
+        };
+        attachments.push(ref);
+      }
+      body['attachments'] = attachments;
     }
     if (request.clientMessageId !== null) {
       body['clientMessageId'] = request.clientMessageId;
@@ -161,6 +215,38 @@ export class SessionsApi {
     return parseRemoteSessionResponse(response);
   }
 
+  // Takeover is toggled through dedicated endpoints (the server ignores the
+  // takeover field on PATCH /sessions/{id}/meta).
+  async enableTakeover(serverUrl: string, authorizationToken: string,
+    sessionId: string): Promise<RemoteSession> {
+    const body: Record<string, Object> = {};
+    const response = await this.client.postJson(serverUrl,
+      `/sessions/${encodeURIComponent(sessionId)}/takeover`, body, authorizationToken);
+    return parseRemoteSession(requireRecord(response, 'session'));
+  }
+
+  async disableTakeover(serverUrl: string, authorizationToken: string,
+    sessionId: string): Promise<RemoteSession> {
+    const response = await this.client.deleteJson(serverUrl,
+      `/sessions/${encodeURIComponent(sessionId)}/takeover`, authorizationToken);
+    return parseRemoteSession(requireRecord(response, 'session'));
+  }
+
+  async getSessionRuntimeCapabilities(serverUrl: string, authorizationToken: string,
+    sessionId: string): Promise<RemoteRuntimeCapabilitySet> {
+    const response = await this.client.getJson(serverUrl,
+      `/sessions/${encodeURIComponent(sessionId)}/runtime/capabilities`, authorizationToken);
+    return parseRemoteRuntimeCapabilitySet(response);
+  }
+
+  async createSessionShare(serverUrl: string, authorizationToken: string,
+    sessionId: string, scope: string, itemIds: string[]): Promise<RemoteSessionShareResponse> {
+    const body: Record<string, Object> = { 'scope': scope, 'itemIds': itemIds };
+    const response = await this.client.postJson(serverUrl,
+      `/sessions/${encodeURIComponent(sessionId)}/shares`, body, authorizationToken);
+    return { shareUrl: objGetString(response, 'shareUrl', '') };
+  }
+
   async getSessionMeta(serverUrl: string, authorizationToken: string,
     sessionId: string): Promise<RemoteSessionResponse> {
     const response = await this.client.getJson(serverUrl,
@@ -184,6 +270,17 @@ export class SessionsApi {
     ids: string[]): Promise<RemoteSessionsMutationResponse> {
     const response = await this.client.postJsonArray(serverUrl, '/sessions/read', ids, authorizationToken);
     return parseRemoteSessionsMutationResponse(response);
+  }
+
+  async archiveAllProjectSessions(serverUrl: string, authorizationToken: string, projectId: string,
+    archived: boolean, scope: string): Promise<RemoteSession[]> {
+    const body: Record<string, Object> = {
+      'archived': archived,
+      'scope': scope
+    };
+    const response = await this.client.postJson(serverUrl,
+      `/projects/${encodeURIComponent(projectId)}/sessions/archive-all`, body, authorizationToken);
+    return sessionsFromArrayResponse(response);
   }
 
   async archiveAllDeviceSessions(serverUrl: string, authorizationToken: string, deviceId: string,
@@ -311,10 +408,13 @@ export class SessionsApi {
   }
 
   async respondToRuntimeNotice(serverUrl: string, authorizationToken: string, sessionId: string,
-    noticeId: string, actionId: string): Promise<RemoteRpcResponse> {
+    noticeId: string, actionId: string, input: Record<string, Object> | null = null): Promise<RemoteRpcResponse> {
     const body: Record<string, Object> = {
       'actionId': actionId
     };
+    if (input !== null) {
+      body['input'] = input;
+    }
     const response = await this.client.postJson(serverUrl,
       `/sessions/${encodeURIComponent(sessionId)}/runtime/notices/${encodeURIComponent(noticeId)}/respond`,
       body, authorizationToken);

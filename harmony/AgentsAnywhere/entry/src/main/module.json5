@@ -14,6 +14,12 @@
     "requestPermissions": [
       {
         "name": "ohos.permission.INTERNET"
+      },
+      {
+        "name": "ohos.permission.KEEP_BACKGROUND_RUNNING"
+      },
+      {
+        "name": "ohos.permission.VIBRATE"
       }
     ],
     "abilities": [
@@ -25,6 +31,9 @@
         "label": "$string:EntryAbility_label",
         "startWindowIcon": "$media:startIcon",
         "startWindowBackground": "$color:start_window_background",
+        "backgroundModes": [
+          "dataTransfer"
+        ],
         "exported": true,
         "skills": [
           {

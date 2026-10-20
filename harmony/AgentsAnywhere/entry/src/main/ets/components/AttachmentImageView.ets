@@ -5,9 +5,11 @@ import { AuthSessionStore } from '../auth/AuthSessionStore';
 import { errorMessageFrom } from '../common/ApiException';
 import { RemoteDownloadedAttachment } from '../api/SessionDtos';
 import { SessionsApi } from '../api/SessionsApi';
+import { getColors } from '../designsystem/ColorTokens';
 
 const ATTACHMENT_IMAGE_CACHE_LIMIT = 32;
 const ATTACHMENT_MAX_DOWNLOAD_BYTES = 26214400;
+const ATTACHMENT_PENDING_POLL_MS = 600;
 
 const attachmentPixelMapCache: Map<string, image.PixelMap> = new Map();
 const attachmentPixelMapOrder: string[] = [];
@@ -32,6 +34,51 @@ function rememberAttachmentPixelMap(key: string, pixelMap: image.PixelMap): void
   }
 }
 
+function attachmentPendingDelay(): Promise<void> {
+  return new Promise<void>((resolve: (value: void) => void) => {
+    setTimeout((): void => {
+      resolve();
+    }, ATTACHMENT_PENDING_POLL_MS);
+  });
+}
+
+export async function loadAttachmentPixelMap(sessionId: string, fileId: string): Promise<image.PixelMap> {
+  const key = `${sessionId}/${fileId}`;
+  const cached = attachmentPixelMapCache.get(key);
+  if (cached !== undefined) {
+    return cached;
+  }
+  if (attachmentPendingKeys.has(key)) {
+    await attachmentPendingDelay();
+    return loadAttachmentPixelMap(sessionId, fileId);
+  }
+  attachmentPendingKeys.add(key);
+  try {
+    const authStore = AuthSessionStore.getInstance();
+    const sessionsApi = new SessionsApi(SharedApiClient.getInstance());
+    const downloaded: RemoteDownloadedAttachment = await sessionsApi.downloadSessionAttachment(
+      authStore.readServerUrl(), authStore.readAccessToken(), sessionId, fileId);
+    if (downloaded.contentBase64.length === 0) {
+      throw new Error('The attachment did not download completely.');
+    }
+    const decoder = new util.Base64Helper();
+    const bytes = decoder.decodeSync(downloaded.contentBase64);
+    if (bytes.byteLength === 0 || bytes.byteLength > ATTACHMENT_MAX_DOWNLOAD_BYTES) {
+      throw new Error('The attachment is too large to display.');
+    }
+    if (downloaded.size > 0 && bytes.byteLength !== downloaded.size) {
+      throw new Error('The attachment did not download completely.');
+    }
+    const source = image.createImageSource(bytes);
+    const decoded = await source.createPixelMap();
+    await source.release();
+    rememberAttachmentPixelMap(key, decoded);
+    return decoded;
+  } finally {
+    attachmentPendingKeys.delete(key);
+  }
+}
+
 @Component
 export struct AttachmentImageView {
   @Prop sessionId: string = '';
@@ -39,8 +86,6 @@ export struct AttachmentImageView {
   @State pixelMap: image.PixelMap | undefined = undefined;
   @State loadState: string = 'loading';
   @State errorText: string = '';
-  private authStore: AuthSessionStore = AuthSessionStore.getInstance();
-  private sessionsApi: SessionsApi = new SessionsApi(SharedApiClient.getInstance());
 
   aboutToAppear(): void {
     this.loadPixelMap();
@@ -52,45 +97,12 @@ export struct AttachmentImageView {
       this.errorText = 'Attachment is unavailable.';
       return;
     }
-    const key = `${this.sessionId}/${this.fileId}`;
-    const cached = attachmentPixelMapCache.get(key);
-    if (cached !== undefined) {
-      this.pixelMap = cached;
-      this.loadState = 'loaded';
-      return;
-    }
-    if (attachmentPendingKeys.has(key)) {
-      setTimeout(() => {
-        this.loadPixelMap();
-      }, 600);
-      return;
-    }
-    attachmentPendingKeys.add(key);
     try {
-      const downloaded: RemoteDownloadedAttachment = await this.sessionsApi.downloadSessionAttachment(
-        this.authStore.readServerUrl(), this.authStore.readAccessToken(), this.sessionId, this.fileId);
-      if (downloaded.contentBase64.length === 0) {
-        throw new Error('The attachment did not download completely.');
-      }
-      const decoder = new util.Base64Helper();
-      const bytes = decoder.decodeSync(downloaded.contentBase64);
-      if (bytes.byteLength === 0 || bytes.byteLength > ATTACHMENT_MAX_DOWNLOAD_BYTES) {
-        throw new Error('The attachment is too large to display.');
-      }
-      if (downloaded.size > 0 && bytes.byteLength !== downloaded.size) {
-        throw new Error('The attachment did not download completely.');
-      }
-      const source = image.createImageSource(bytes);
-      const decoded = await source.createPixelMap();
-      await source.release();
-      rememberAttachmentPixelMap(key, decoded);
-      this.pixelMap = decoded;
+      this.pixelMap = await loadAttachmentPixelMap(this.sessionId, this.fileId);
       this.loadState = 'loaded';
     } catch (error) {
       this.loadState = 'failed';
       this.errorText = errorMessageFrom(error as Object);
-    } finally {
-      attachmentPendingKeys.delete(key);
     }
   }
 
@@ -105,15 +117,15 @@ export struct AttachmentImageView {
     Column() {
       if (this.pixelMap !== undefined) {
         Image(this.pixelMap)
-          .objectFit(ImageFit.Contain)
-          .borderRadius(8)
-          .width('100%')
-          .constraintSize({ maxHeight: 260 })
+          .objectFit(ImageFit.Cover)
+          .borderRadius(14)
+          .width(196)
+          .height(142)
       } else if (this.loadState === 'failed') {
         Row({ space: 8 }) {
           Text(this.statusLabel())
             .fontSize(12)
-            .fontColor('#6B7280')
+            .fontColor(getColors().muted)
             .layoutWeight(1)
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
@@ -121,8 +133,8 @@ export struct AttachmentImageView {
             .fontSize(11)
             .height(24)
             .padding({ left: 8, right: 8 })
-            .backgroundColor('#E5E7EB')
-            .fontColor('#374151')
+            .backgroundColor(getColors().secondaryActionSurface)
+            .fontColor(getColors().ink)
             .onClick(() => {
               this.loadState = 'loading';
               this.loadPixelMap();
@@ -131,7 +143,7 @@ export struct AttachmentImageView {
         .width('100%')
         .padding({ left: 10, right: 10, top: 6, bottom: 6 })
         .borderRadius(8)
-        .backgroundColor('rgba(0,0,0,0.06)')
+        .backgroundColor('rgba(0,0,0,0.13)')
       } else {
         Row({ space: 8 }) {
           LoadingProgress()
@@ -139,13 +151,13 @@ export struct AttachmentImageView {
             .height(16)
           Text(this.statusLabel())
             .fontSize(12)
-            .fontColor('#6B7280')
+            .fontColor(getColors().muted)
             .layoutWeight(1)
         }
         .width('100%')
         .padding({ left: 10, right: 10, top: 6, bottom: 6 })
         .borderRadius(8)
-        .backgroundColor('rgba(0,0,0,0.06)')
+        .backgroundColor('rgba(0,0,0,0.13)')
       }
     }
     .width('100%')
