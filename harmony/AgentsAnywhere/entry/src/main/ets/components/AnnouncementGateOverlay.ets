@@ -1,8 +1,10 @@
 import { MdBlock } from '../common/Markdown';
 import { AgentMarkdownView } from './AgentMarkdownView';
+import { APP_IS_DARK_KEY, getColors } from '../designsystem/ColorTokens';
 
 @Component
 export struct AnnouncementGateOverlay {
+  @StorageProp(APP_IS_DARK_KEY) themeIsDark: boolean = false;
   blocks: MdBlock[] = [];
   onClose: () => void = () => {};
 
@@ -12,25 +14,26 @@ export struct AnnouncementGateOverlay {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('rgba(0,0,0,0.45)')
+      .backgroundColor(this.themeIsDark ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.4)')
       .onClick(() => {
         this.onClose();
       })
-      Column({ space: 14 }) {
-        Text('Announcement')
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#111827')
+      Column({ space: 16 }) {
+        Text($r('app.string.announcement_title'))
+          .fontSize(20)
+          .fontWeight(600)
+          .lineHeight(24)
+          .fontColor(getColors().ink)
           .width('100%')
         Scroll() {
           Column() {
             AgentMarkdownView({
               blocks: this.blocks,
-              textColor: '#374151',
-              linkColor: '#2563EB',
-              inlineCodeColor: '#92400E',
-              codePanelColor: '#F3F4F6',
-              codePanelTextColor: '#1F2937',
+              textColor: getColors().inkSoft,
+              linkColor: getColors().primaryAction,
+              inlineCodeColor: getColors().mdInlineOnSurface,
+              codePanelColor: getColors().sessionCodeSurface,
+              codePanelTextColor: getColors().mdCodeOnSurface,
               fontSize: 14
             })
           }
@@ -41,21 +44,23 @@ export struct AnnouncementGateOverlay {
         .align(Alignment.TopStart)
         .width('100%')
         .constraintSize({ maxHeight: 320 })
-        Button('Got it')
-          .fontSize(15)
+        Button($r('app.string.announcement_acknowledge'))
+          .fontSize(14)
           .fontWeight(FontWeight.Medium)
-          .fontColor(Color.White)
-          .backgroundColor('#2563EB')
-          .height(42)
+          .fontColor(getColors().onPrimaryAction)
+          .backgroundColor(getColors().primaryAction)
+          .height(40)
+          .borderRadius(20)
           .width('100%')
           .onClick(() => {
             this.onClose();
           })
       }
       .width('86%')
-      .padding(18)
-      .borderRadius(16)
-      .backgroundColor(Color.White)
+      .padding(20)
+      .borderRadius(20)
+      .backgroundColor(getColors().dialogSurface)
+      .border({ width: 1, color: getColors().border })
     }
     .width('100%')
     .height('100%')

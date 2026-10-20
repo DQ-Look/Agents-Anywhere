@@ -5,6 +5,7 @@ export interface MdSpan {
   code: boolean;
   strike: boolean;
   linkUrl: string | null;
+  path: string | null;
 }
 
 export interface MdBlock {
@@ -16,6 +17,14 @@ export interface MdBlock {
   itemNumber: number;
   spans: MdSpan[];
   children: MdBlock[];
+  table?: MdTable;
+  taskChecked?: boolean;
+}
+
+export interface MdTable {
+  header: string[];
+  rows: string[][];
+  aligns: string[];
 }
 
 interface MdHeadingMatch {
@@ -29,6 +38,26 @@ interface MdListItemMatch {
   text: string;
 }
 
+interface MdLinkRun {
+  url: string;
+  next: number;
+}
+
+interface MdPathRun {
+  path: string;
+  next: number;
+}
+
+interface MdTaskMatch {
+  checked: boolean;
+  rest: string;
+}
+
+interface MdTableResult {
+  block: MdBlock;
+  nextIndex: number;
+}
+
 export function makeMdSpan(text: string): MdSpan {
   return {
     text: text,
@@ -36,7 +65,8 @@ export function makeMdSpan(text: string): MdSpan {
     italic: false,
     code: false,
     strike: false,
-    linkUrl: null
+    linkUrl: null,
+    path: null
   };
 }
 
@@ -88,6 +118,184 @@ function isSupportedLinkUrl(url: string): boolean {
   return lowered.startsWith('http://') || lowered.startsWith('https://');
 }
 
+function collectUrlRun(text: string, index: number, end: number): string {
+  let run = '';
+  let pos = index;
+  while (pos < end) {
+    const ch = text.charAt(pos);
+    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '(' || ch === ')' ||
+      ch === '<' || ch === '>' || ch === '[' || ch === ']') {
+      break;
+    }
+    run += ch;
+    pos++;
+  }
+  return run;
+}
+
+function trimTrailingPunctuation(text: string): string {
+  let result = text;
+  while (result.length > 1) {
+    const last = result.charAt(result.length - 1);
+    if (last === '.' || last === ',' || last === ';' || last === ':') {
+      result = result.substring(0, result.length - 1);
+    } else {
+      break;
+    }
+  }
+  return result;
+}
+
+function tryConsumeLink(text: string, index: number, end: number): MdLinkRun | null {
+  if (index + 7 >= end) {
+    return null;
+  }
+  const slice = text.substring(index, index + 8).toLowerCase();
+  if (!slice.startsWith('http://') && !slice.startsWith('https://')) {
+    return null;
+  }
+  const run = collectUrlRun(text, index, end);
+  if (run.length <= 7) {
+    return null;
+  }
+  return { url: run, next: index + run.length };
+}
+
+function pathRunAllowed(ch: string): boolean {
+  return /[A-Za-z0-9_./~\-]/.test(ch);
+}
+
+function tryConsumePath(text: string, index: number, end: number): MdPathRun | null {
+  const ch0 = text.charAt(index);
+  let start = index;
+  if (ch0 === '/') {
+    start = index;
+  } else if (ch0 === '.' && index + 1 < end && text.charAt(index + 1) === '/') {
+    start = index;
+  } else if (ch0 === '.' && index + 2 < end && text.charAt(index + 1) === '.' && text.charAt(index + 2) === '/') {
+    start = index;
+  } else if (ch0 === '~' && index + 1 < end && text.charAt(index + 1) === '/') {
+    start = index;
+  } else {
+    return null;
+  }
+  let pos = start;
+  let run = '';
+  while (pos < end && pathRunAllowed(text.charAt(pos))) {
+    run += text.charAt(pos);
+    pos++;
+  }
+  if (run.length < 3 || run.indexOf('/') < 0) {
+    return null;
+  }
+  const trimmed = trimTrailingPunctuation(run);
+  if (trimmed.length < 2) {
+    return null;
+  }
+  return { path: trimmed, next: start + trimmed.length };
+}
+
+function matchTaskMarker(text: string): MdTaskMatch | null {
+  if (text.startsWith('[ ] ')) {
+    return { checked: false, rest: text.substring(4).trim() };
+  }
+  if (text.startsWith('[x] ') || text.startsWith('[X] ')) {
+    return { checked: true, rest: text.substring(4).trim() };
+  }
+  if (text === '[ ]' || text === '[x]' || text === '[X]') {
+    return { checked: text !== '[ ]', rest: '' };
+  }
+  return null;
+}
+
+function splitTableRow(line: string): string[] {
+  let trimmed = line.trim();
+  if (trimmed.startsWith('|')) {
+    trimmed = trimmed.substring(1);
+  }
+  if (trimmed.endsWith('|')) {
+    trimmed = trimmed.substring(0, trimmed.length - 1);
+  }
+  const cells = trimmed.split('|');
+  const result: string[] = [];
+  for (const cell of cells) {
+    result.push(cell.trim());
+  }
+  return result;
+}
+
+function isSeparatorRow(line: string): boolean {
+  const cells = splitTableRow(line);
+  if (cells.length < 1) {
+    return false;
+  }
+  for (const cell of cells) {
+    const content = cell.trim().replace(/:/g, '');
+    if (content.length === 0 || !/^-+$/.test(content)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function parseAligns(separatorRow: string): string[] {
+  const cells = splitTableRow(separatorRow);
+  const aligns: string[] = [];
+  for (const cell of cells) {
+    const text = cell.trim();
+    const content = text.replace(/:/g, '');
+    if (content.length === 0 || /^-+$/.test(content)) {
+      const left = text.startsWith(':');
+      const right = text.endsWith(':');
+      if (left && right) {
+        aligns.push('center');
+      } else if (right) {
+        aligns.push('right');
+      } else if (left) {
+        aligns.push('left');
+      } else {
+        aligns.push('');
+      }
+    } else {
+      aligns.push('');
+    }
+  }
+  return aligns;
+}
+
+function tryParseGfmTable(lines: string[], index: number): MdTableResult | null {
+  if (index + 1 >= lines.length) {
+    return null;
+  }
+  const headerLine = lines[index].trim();
+  if (!headerLine.includes('|')) {
+    return null;
+  }
+  const separatorLine = lines[index + 1].trim();
+  if (!isSeparatorRow(separatorLine)) {
+    return null;
+  }
+  const header = splitTableRow(headerLine);
+  const aligns = parseAligns(separatorLine);
+  const rows: string[][] = [];
+  let nextIndex = index + 2;
+  while (nextIndex < lines.length) {
+    const rowLine = lines[nextIndex].trim();
+    if (rowLine.length === 0 || !rowLine.includes('|')) {
+      break;
+    }
+    if (isSeparatorRow(rowLine)) {
+      break;
+    }
+    rows.push(splitTableRow(rowLine));
+    nextIndex++;
+  }
+  const table: MdTable = { header: header, rows: rows, aligns: aligns };
+  const block = newMdBlock('table');
+  block.table = table;
+  return { block: block, nextIndex: nextIndex };
+}
+
 function pushPlainSpan(spans: MdSpan[], buffer: string): void {
   if (buffer.length === 0) {
     return;
@@ -119,8 +327,12 @@ function parseInlineRange(text: string, start: number, end: number): MdSpan[] {
       if (closing > index + 1) {
         pushPlainSpan(spans, buffer);
         buffer = '';
-        const codeSpan = makeMdSpan(text.substring(index + 1, closing));
+        const innerText = text.substring(index + 1, closing);
+        const codeSpan = makeMdSpan(innerText);
         codeSpan.code = true;
+        if (tryConsumePath(innerText, 0, innerText.length) !== null) {
+          codeSpan.path = innerText;
+        }
         spans.push(codeSpan);
         index = closing + 1;
         continue;
@@ -200,6 +412,28 @@ function parseInlineRange(text: string, start: number, end: number): MdSpan[] {
             continue;
           }
         }
+      }
+    }
+    const link = tryConsumeLink(text, index, end);
+    if (link !== null) {
+      pushPlainSpan(spans, buffer);
+      buffer = '';
+      const urlSpan = makeMdSpan(link.url);
+      urlSpan.linkUrl = link.url;
+      spans.push(urlSpan);
+      index = link.next;
+      continue;
+    }
+    if (ch !== '`' && ch !== '[' && ch !== '(' && ch !== ')') {
+      const path = tryConsumePath(text, index, end);
+      if (path !== null) {
+        pushPlainSpan(spans, buffer);
+        buffer = '';
+        const pathSpan = makeMdSpan(path.path);
+        pathSpan.path = path.path;
+        spans.push(pathSpan);
+        index = path.next;
+        continue;
       }
     }
     buffer += ch;
@@ -353,10 +587,22 @@ export function parseMarkdownBlocks(text: string): MdBlock[] {
         const block = newMdBlock('listItem');
         block.ordered = item.ordered;
         block.itemNumber = item.itemNumber;
-        block.spans = parseInlineSpans(item.text);
+        const task = matchTaskMarker(item.text);
+        if (task !== null) {
+          block.taskChecked = task.checked;
+          block.spans = parseInlineSpans(task.rest);
+        } else {
+          block.spans = parseInlineSpans(item.text);
+        }
         blocks.push(block);
         index++;
       }
+      continue;
+    }
+    const tableResult = tryParseGfmTable(lines, index);
+    if (tableResult !== null) {
+      blocks.push(tableResult.block);
+      index = tableResult.nextIndex;
       continue;
     }
     const paragraphLines: string[] = [];

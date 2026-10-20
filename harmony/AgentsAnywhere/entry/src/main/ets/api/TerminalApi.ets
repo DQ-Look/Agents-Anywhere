@@ -70,6 +70,25 @@ export class TerminalApi {
       `/connectors/${encodeURIComponent(deviceId)}/terminals-v2/${encodeURIComponent(terminalId)}` +
       `/stream?fromSeq=${fromSeq}`);
   }
+
+  // terminals-v2 has no dedicated resize endpoint; the remote shell is resized
+  // with a stream resize frame (mirrors android's sendRemoteResizeNow).
+  resizeFrame(cols: number, rows: number): string {
+    const frame: Record<string, Object> = {
+      'type': 'resize',
+      'cols': cols,
+      'rows': rows
+    };
+    return JSON.stringify(frame);
+  }
+
+  inputFrame(text: string): string {
+    const frame: Record<string, Object> = {
+      'type': 'input',
+      'data': text
+    };
+    return JSON.stringify(frame);
+  }
 }
 
 function requireResult(response: Record<string, Object>): Record<string, Object> {

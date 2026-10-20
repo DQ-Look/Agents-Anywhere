@@ -27,6 +27,19 @@ export interface RemoteTextFile {
   serverTime: string;
 }
 
+// Result of POST /connectors/{connectorId}/fs/read: the connector file
+// metadata plus a one-shot transfer URL that streams the raw bytes.
+export interface RemoteAgentFileDownload {
+  path: string;
+  name: string;
+  size: number;
+  sha256: string;
+  mediaType: string;
+  transferId: string;
+  token: string;
+  downloadUrl: string;
+}
+
 export class FilesApi {
   private readonly client: ApiClient;
 
@@ -65,7 +78,7 @@ export class FilesApi {
     }
     const pathValue = objGetOptString(resultRecord, 'path');
     const directory: RemoteDirectory = {
-      path: pathValue === null || pathValue.length === 0 ? root : pathValue,
+      path: pathValue === null ? root : pathValue,
       entries: entries,
       truncated: objGetBool(resultRecord, 'truncated', false),
       targetType: objGetString(resultRecord, 'targetType', 'directory')
@@ -95,5 +108,48 @@ export class FilesApi {
       serverTime: objGetString(response, 'serverTime', '')
     };
     return textFile;
+  }
+
+  // Session agent files (Android parity: FilesController.listFiles called with
+  // the session's connectorId and the session cwd as root). Same
+  // POST /connectors/{connectorId}/fs/list contract as listFiles above.
+  async listSessionAgentFiles(serverUrl: string, authorizationToken: string, connectorId: string,
+    workspaceRoot: string, path: string = '.'): Promise<RemoteDirectory> {
+    return this.listFiles(serverUrl, authorizationToken, connectorId, workspaceRoot, path);
+  }
+
+  // Session agent text preview (Android parity: FilesController.readTextFile
+  // with the session's connectorId and the session cwd as root). Same
+  // POST /connectors/{connectorId}/fs/readText?root=... contract.
+  async readSessionAgentTextFile(serverUrl: string, authorizationToken: string, connectorId: string,
+    workspaceRoot: string, path: string, maxBytes: number = 1048576): Promise<RemoteTextFile> {
+    return this.readTextFile(serverUrl, authorizationToken, connectorId, workspaceRoot, path, maxBytes);
+  }
+
+  // POST /connectors/{connectorId}/fs/read?root=... — prepare a transfer-based
+  // download for a file inside the session workspace. The returned downloadUrl
+  // is a server-relative path that streams the raw bytes without extra auth.
+  async requestSessionAgentFileDownload(serverUrl: string, authorizationToken: string,
+    connectorId: string, workspaceRoot: string, path: string): Promise<RemoteAgentFileDownload> {
+    const body: Record<string, Object> = {
+      'path': path
+    };
+    const response = await this.client.postJson(serverUrl,
+      `/connectors/${encodeURIComponent(connectorId)}/fs/read?root=${encodeURIComponent(workspaceRoot)}`,
+      body, authorizationToken);
+    const result = objGetRecord(response, 'result');
+    const resultRecord: Record<string, Object> = result === null ? {} : result;
+    const name = objGetOptString(resultRecord, 'name');
+    const download: RemoteAgentFileDownload = {
+      path: objGetString(resultRecord, 'path', path),
+      name: name === null ? 'Untitled' : name,
+      size: objGetNumber(resultRecord, 'size', 0),
+      sha256: objGetString(resultRecord, 'sha256', ''),
+      mediaType: objGetString(resultRecord, 'mediaType', 'application/octet-stream'),
+      transferId: objGetString(resultRecord, 'transferId', ''),
+      token: objGetString(resultRecord, 'token', ''),
+      downloadUrl: objGetString(resultRecord, 'downloadUrl', '')
+    };
+    return download;
   }
 }

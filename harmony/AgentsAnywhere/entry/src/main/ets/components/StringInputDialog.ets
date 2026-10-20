@@ -1,9 +1,12 @@
+import { APP_IS_DARK_KEY, getColors } from '../designsystem/ColorTokens';
+
 @Component
 export struct StringInputDialog {
-  title: string = '';
+  @StorageProp(APP_IS_DARK_KEY) themeIsDark: boolean = false;
+  title: ResourceStr = '';
   initial: string = '';
-  placeholder: string = '';
-  saveLabel: string = 'Save';
+  placeholder: ResourceStr = '';
+  saveLabel: ResourceStr = $r('app.string.profile_save');
   busy: boolean = false;
   onSave: (value: string) => void = () => {};
   onCancel: () => void = () => {};
@@ -37,11 +40,11 @@ export struct StringInputDialog {
             this.text = value;
           })
         Row({ space: 10 }) {
-          Button('Cancel')
+          Button($r('app.string.profile_cancel'))
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
-            .fontColor('#374151')
-            .backgroundColor('#F2F3F5')
+            .fontColor(getColors().inkSoft)
+            .backgroundColor(getColors().subtle)
             .height(42)
             .layoutWeight(1)
             .enabled(!this.busy)
@@ -51,8 +54,8 @@ export struct StringInputDialog {
           Button(this.saveLabel)
             .fontSize(15)
             .fontWeight(FontWeight.Medium)
-            .fontColor(Color.White)
-            .backgroundColor('#2563EB')
+            .fontColor(getColors().onPrimaryAction)
+            .backgroundColor(getColors().primaryAction)
             .height(42)
             .layoutWeight(1)
             .enabled(!this.busy)

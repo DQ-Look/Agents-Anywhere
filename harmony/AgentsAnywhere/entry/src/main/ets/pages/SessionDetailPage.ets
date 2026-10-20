@@ -1,29 +1,63 @@
-import { ApiClient } from '../api/ApiClient';
+import { ApiClient, UploadFilePart } from '../api/ApiClient';
 import { RealtimeApi } from '../api/RealtimeApi';
 import { RealtimeSocketListener, RealtimeWebSocket } from '../api/RealtimeWebSocket';
 import { SharedApiClient } from '../api/SharedApiClient';
 import {
   RemoteCommandResult,
   RemoteNoticeAction,
+  RemoteDownloadedAttachment,
   RemoteRuntimeCommand,
   RemoteRuntimeNotice,
+  RemoteRuntimeCapabilitySet,
   RemoteSession,
   RemoteSessionEventEnvelope,
   RemoteTimelineAttachment,
   RemoteTimelineItem,
-  RemoteUploadedAttachment
+  RemoteUploadedAttachment,
+  hasCapability
 } from '../api/SessionDtos';
 import { SessionsApi } from '../api/SessionsApi';
 import { AuthSessionStore } from '../auth/AuthSessionStore';
 import { errorMessageFrom } from '../common/ApiException';
 import { MdBlock, parseMarkdownBlocks } from '../common/Markdown';
+import { OPTIMISTIC_PREFIX, OptimisticMessageStore } from '../common/OptimisticMessageStore';
 import { AgentMarkdownView } from '../components/AgentMarkdownView';
 import { AttachmentImageView } from '../components/AttachmentImageView';
+import { AttachmentPreviewOverlay } from '../components/AttachmentPreviewOverlay';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { DiffCodeView } from '../components/DiffCodeView';
+import { fileIo } from '@kit.CoreFileKit';
+import { picker } from '@kit.CoreFileKit';
+import { common, OpenLinkOptions } from '@kit.AbilityKit';
+import { camera, cameraPicker } from '@kit.CameraKit';
+import { util } from '@kit.ArkTS';
+import { showToast } from '../utils/Toast';
+import {
+  NoticeAnswerDraft,
+  NoticeInputField,
+  NoticeInputRequestForm,
+  NoticeInputRequestOption,
+  NoticeInputRequestQuestion,
+  buildNoticeFormPayload,
+  coerceNoticeInput,
+  isNoticeFormComplete,
+  noticeInputFields,
+  noticeInputRequestForm
+} from '../feature/NoticeInputForm';
+import { APP_IS_DARK_KEY, getColors } from '../designsystem/ColorTokens';
+import { RadiusTokens } from '../designsystem/TypeTokens';
 
 interface TimelineEntry {
   item: RemoteTimelineItem;
   blocks: MdBlock[];
   attachments: RemoteTimelineAttachment[];
+}
+
+// Result of applying one realtime event: whether the rendered entry list must
+// be rebuilt and whether runtime notices need a refetch.
+interface EventApplyOutcome {
+  itemsChanged: boolean;
+  noticesStale: boolean;
 }
 
 interface SlashIntent {
@@ -34,7 +68,6 @@ interface SlashIntent {
   commandLike: boolean;
 }
 
-const OPTIMISTIC_PREFIX = 'opt_';
 const BUSY_STATUSES: string[] = ['waiting', 'pending', 'running', 'stopping', 'waiting_approval', 'blocked'];
 const RETRY_BASE_DELAY_MS = 1000;
 const RETRY_MAX_DELAY_MS = 30000;
@@ -42,6 +75,17 @@ const MAX_PROCESSED_EVENT_IDS = 1000;
 const RETAINED_PROCESSED_EVENT_IDS = 500;
 const MAX_SUGGESTIONS = 6;
 const MAX_PENDING_ATTACHMENTS = 10;
+// Capability ids mirrored from Android SessionRuntimeState.kt.
+const SESSION_SEND_MESSAGE_CAPABILITY = 'session.send_message';
+const SESSION_INTERRUPT_CAPABILITY = 'session.interrupt';
+const SESSION_NOTICE_RESPONSE_CAPABILITY = 'session.interaction.approval';
+const SESSION_COMMANDS_CAPABILITY = 'session.commands';
+const SESSION_COMMAND_EXECUTE_CAPABILITY = 'session.command.execute';
+const SESSION_ATTACHMENT_CAPABILITY = 'runtime.attachment';
+// Realtime events are aggregated into short batches before being applied so a
+// burst of events triggers a single UI refresh (Android batches too).
+const EVENT_BATCH_WINDOW_MS = 100;
+const MAX_PENDING_REALTIME_EVENTS = 128;
 
 function isBusyStatus(status: string): boolean {
   return BUSY_STATUSES.indexOf(status) >= 0;
@@ -146,6 +190,7 @@ function reconnectDelayMs(attempt: number): number {
 
 @Component
 export struct SessionDetailPage {
+  @StorageProp(APP_IS_DARK_KEY) themeIsDark: boolean = false;
   @State loading: boolean = true;
   @State errorMessage: string = '';
   @State title: string = 'Session';
@@ -158,15 +203,29 @@ export struct SessionDetailPage {
   @State attachmentPanelOpen: boolean = false;
   @State attachmentUrlInput: string = '';
   @State uploadingAttachment: boolean = false;
+  @State pickingLocalFile: boolean = false;
+  @State savingAttachmentId: string = '';
   @State pendingAttachments: RemoteUploadedAttachment[] = [];
   @State sending: boolean = false;
   @State interrupting: boolean = false;
   @State executingCommand: boolean = false;
   @State respondingNoticeId: string = '';
+  @State noticeFieldDrafts: Map<string, Map<string, string>> = new Map();
+  @State noticeAnswerDrafts: Map<string, Map<string, NoticeAnswerDraft>> = new Map();
+  @State noticeValidationErrors: Map<string, string> = new Map();
+  @State noticeSelectedAction: Map<string, string> = new Map();
   @State realtimeConnected: boolean = false;
   @State hasMoreHistory: boolean = false;
   @State loadingHistory: boolean = false;
   @State canInterrupt: boolean = false;
+  @State capabilities: RemoteRuntimeCapabilitySet | null = null;
+  @State takeoverOn: boolean = false;
+  @State takeoverBusy: boolean = false;
+  @State attachmentPreviewOpen: boolean = false;
+  @State attachmentPreviewAttachments: RemoteTimelineAttachment[] = [];
+  @State attachmentPreviewIndex: number = 0;
+  @State sharing: boolean = false;
+  @State shareBusy: boolean = false;
   private sessionId: string = '';
   private session: RemoteSession | null = null;
   private items: RemoteTimelineItem[] = [];
@@ -175,6 +234,8 @@ export struct SessionDetailPage {
   private timelineEventCursor: string = 'seq:0';
   private processedEventIds: string[] = [];
   private processedEventIdSet: Set<string> = new Set();
+  private pendingRealtimeEvents: RemoteSessionEventEnvelope[] = [];
+  private realtimeBatchTimer: number = -1;
   private pageActive: boolean = false;
   private realtimeRetries: number = 0;
   private retryTimer: number = -1;
@@ -186,6 +247,26 @@ export struct SessionDetailPage {
   private client: ApiClient = SharedApiClient.getInstance();
   private sessionsApi: SessionsApi = new SessionsApi(this.client);
   private realtimeApi: RealtimeApi = new RealtimeApi(this.client);
+  private optimisticStore: OptimisticMessageStore = OptimisticMessageStore.getInstance();
+  private pendingTakeoverValue: boolean = false;
+  private confirmTakeoverDialog: CustomDialogController = new CustomDialogController({
+    builder: ConfirmDialog({
+      title: this.takeoverDialogTitle(),
+      message: this.takeoverDialogMessage(),
+      confirmText: this.takeoverDialogConfirmLabel(),
+      cancelText: $r('app.string.profile_cancel'),
+      confirmIsDanger: false,
+      onConfirm: (): void => {
+        this.confirmTakeoverDialog.close();
+        this.setTakeover(this.pendingTakeoverValue);
+      },
+      onCancel: (): void => {
+        this.confirmTakeoverDialog.close();
+      }
+    }),
+    autoCancel: true,
+    alignment: DialogAlignment.Center
+  });
 
   aboutToDisappear(): void {
     this.pageActive = false;
@@ -193,6 +274,11 @@ export struct SessionDetailPage {
       clearTimeout(this.retryTimer);
       this.retryTimer = -1;
     }
+    if (this.realtimeBatchTimer >= 0) {
+      clearTimeout(this.realtimeBatchTimer);
+      this.realtimeBatchTimer = -1;
+    }
+    this.pendingRealtimeEvents = [];
     this.socket.destroy();
   }
 
@@ -239,7 +325,28 @@ export struct SessionDetailPage {
     this.canInterrupt = isBusyStatus(status);
   }
 
-  private mergeItems(incoming: RemoteTimelineItem[]): void {
+  // Capability-driven gating (Android parity): a missing capability entry
+  // disables the feature, but while capabilities are not loaded at all
+  // (null) the UI must not be gated.
+  private capabilityAllowed(capabilityId: string): boolean {
+    if (this.capabilities === null) {
+      return true;
+    }
+    return hasCapability(this.capabilities, capabilityId);
+  }
+
+  private sendInputAllowed(): boolean {
+    return this.capabilityAllowed(SESSION_SEND_MESSAGE_CAPABILITY) ||
+      this.capabilityAllowed(SESSION_COMMANDS_CAPABILITY) ||
+      this.capabilityAllowed(SESSION_COMMAND_EXECUTE_CAPABILITY);
+  }
+
+  private commandsAllowed(): boolean {
+    return this.capabilityAllowed(SESSION_COMMANDS_CAPABILITY) ||
+      this.capabilityAllowed(SESSION_COMMAND_EXECUTE_CAPABILITY);
+  }
+
+  private mergeItems(incoming: RemoteTimelineItem[], rebuild: boolean = true): void {
     if (incoming.length === 0) {
       return;
     }
@@ -268,10 +375,13 @@ export struct SessionDetailPage {
       merged.push(value);
     });
     this.items = sortItems(merged);
-    this.rebuildEntries();
+    this.syncOptimisticStore();
+    if (rebuild) {
+      this.rebuildEntries();
+    }
   }
 
-  private replaceItems(items: RemoteTimelineItem[]): void {
+  private replaceItems(items: RemoteTimelineItem[], rebuild: boolean = true): void {
     // Preserve in-flight optimistic messages across a full snapshot replace:
     // re-attach those whose clientMessageId is not confirmed by the new list.
     const pendingOptimistic: RemoteTimelineItem[] = [];
@@ -294,7 +404,10 @@ export struct SessionDetailPage {
       merged.push(item);
     }
     this.items = sortItems(merged);
-    this.rebuildEntries();
+    this.syncOptimisticStore();
+    if (rebuild) {
+      this.rebuildEntries();
+    }
   }
 
   private async loadSnapshot(): Promise<void> {
@@ -319,9 +432,90 @@ export struct SessionDetailPage {
       const response = await this.sessionsApi.getSessionRuntimeState(this.serverUrl(), this.token(),
         this.sessionId);
       this.syncStatus(response.state.status);
+      try {
+        this.capabilities = await this.sessionsApi.getSessionRuntimeCapabilities(this.serverUrl(),
+          this.token(), this.sessionId);
+        this.takeoverOn = this.session !== null && this.session.takeover;
+      } catch (error) {
+        this.capabilities = null;
+      }
     } catch (error) {
       return;
     }
+  }
+
+  private takeoverDialogTitle(): ResourceStr {
+    return this.pendingTakeoverValue ? $r('app.string.session_enable_takeover_title')
+      : $r('app.string.session_disable_takeover_title');
+  }
+
+  private takeoverDialogConfirmLabel(): ResourceStr {
+    return this.pendingTakeoverValue ? $r('app.string.common_enable')
+      : $r('app.string.common_disable');
+  }
+
+  private takeoverDialogMessage(): ResourceStr {
+    const agentLabel = this.session !== null && this.session.runtimeName.length > 0
+      ? this.session.runtimeName : 'Agent';
+    if (this.session !== null && this.session.runtimeType === 'dsh') {
+      return this.pendingTakeoverValue ? $r('app.string.session_enable_takeover_dsh_body')
+        : $r('app.string.session_disable_takeover_dsh_body');
+    }
+    return this.pendingTakeoverValue ? $r('app.string.session_enable_takeover_body', agentLabel)
+      : $r('app.string.session_disable_takeover_body', agentLabel);
+  }
+
+  private requestTakeoverChange(desired: boolean): void {
+    if (this.takeoverBusy) {
+      return;
+    }
+    this.pendingTakeoverValue = desired;
+    this.confirmTakeoverDialog.open();
+  }
+
+  private async setTakeover(value: boolean): Promise<void> {
+    if (this.takeoverBusy) {
+      return;
+    }
+    this.takeoverBusy = true;
+    this.takeoverOn = value;
+    try {
+      const session = value
+        ? await this.sessionsApi.enableTakeover(this.serverUrl(), this.token(), this.sessionId)
+        : await this.sessionsApi.disableTakeover(this.serverUrl(), this.token(), this.sessionId);
+      this.syncSessionMeta(session);
+      this.takeoverOn = session.takeover;
+      showToast(value ? $r('app.string.session_takeover_on_toast')
+        : $r('app.string.session_takeover_off_toast'));
+    } catch (error) {
+      this.takeoverOn = !value;
+      this.errorMessage = errorMessageFrom(error as Object);
+    }
+    this.takeoverBusy = false;
+  }
+
+  private async shareSession(): Promise<void> {
+    if (this.shareBusy) {
+      return;
+    }
+    this.shareBusy = true;
+    try {
+      const response = await this.sessionsApi.createSessionShare(this.serverUrl(), this.token(),
+        this.sessionId, 'session', []);
+      const url = response.shareUrl;
+      if (url.length > 0) {
+        const options: OpenLinkOptions = { appLinkingOnly: false };
+        const context = getContext(this) as common.UIAbilityContext;
+        context.openLink(url, options).catch(() => {
+          showToast('Could not open share link.');
+        });
+      } else {
+        showToast('Could not create share link.');
+      }
+    } catch (error) {
+      this.errorMessage = errorMessageFrom(error as Object);
+    }
+    this.shareBusy = false;
   }
 
   private async loadRuntimeCommands(): Promise<void> {
@@ -378,11 +572,13 @@ export struct SessionDetailPage {
     }
   }
 
-  private async respondNotice(notice: RemoteRuntimeNotice, actionId: string): Promise<void> {
+  private async respondNotice(notice: RemoteRuntimeNotice, actionId: string,
+    input: Record<string, Object> | null): Promise<void> {
     this.respondingNoticeId = notice.noticeId;
+    this.noticeValidationErrors.delete(notice.noticeId);
     try {
       const rpc = await this.sessionsApi.respondToRuntimeNotice(this.serverUrl(), this.token(),
-        this.sessionId, notice.noticeId, actionId);
+        this.sessionId, notice.noticeId, actionId, input);
       if (!rpc.ok) {
         this.errorMessage = rpc.errorMessage === null ? 'Could not respond to the request.' : rpc.errorMessage;
       }
@@ -392,6 +588,195 @@ export struct SessionDetailPage {
       this.errorMessage = errorMessageFrom(error as Object);
     }
     this.respondingNoticeId = '';
+  }
+
+  private noticeInputFormOf(notice: RemoteRuntimeNotice): NoticeInputRequestForm | null {
+    return noticeInputRequestForm(notice);
+  }
+
+  private noticeSchemaFieldsOf(notice: RemoteRuntimeNotice, actionId: string): NoticeInputField[] {
+    for (const action of notice.actions) {
+      if (action.actionId === actionId) {
+        return noticeInputFields(action);
+      }
+    }
+    return [];
+  }
+
+  private noticeFieldDraft(noticeId: string, key: string): string {
+    const inner = this.noticeFieldDrafts.get(noticeId);
+    if (inner === undefined) {
+      return '';
+    }
+    const value = inner.get(key);
+    return value === undefined ? '' : value;
+  }
+
+  private setNoticeFieldDraft(noticeId: string, key: string, value: string): void {
+    const draft = this.noticeFieldDrafts;
+    const current: Map<string, string> | undefined = draft.get(noticeId);
+    if (current === undefined) {
+      const next: Map<string, string> = new Map();
+      next.set(key, value);
+      draft.set(noticeId, next);
+      return;
+    }
+    current.set(key, value);
+  }
+
+  private toggleNoticeOption(noticeId: string, questionId: string, optionId: string,
+    multiple: boolean): void {
+    const outer = this.noticeAnswerDrafts;
+    let answers = outer.get(noticeId);
+    if (answers === undefined) {
+      answers = new Map<string, NoticeAnswerDraft>();
+      outer.set(noticeId, answers);
+    }
+    let draft = answers.get(questionId);
+    if (draft === undefined) {
+      const newDraft: NoticeAnswerDraft = { optionIds: [], customText: '', useCustom: false };
+      draft = newDraft;
+      answers.set(questionId, draft);
+    }
+    const index = draft.optionIds.indexOf(optionId);
+    if (index >= 0) {
+      draft.optionIds.splice(index, 1);
+      draft.useCustom = false;
+      draft.customText = '';
+    } else if (multiple) {
+      draft.optionIds.push(optionId);
+    } else {
+      draft.optionIds = [optionId];
+    }
+  }
+
+  private setNoticeCustomText(noticeId: string, questionId: string, text: string): void {
+    const outer = this.noticeAnswerDrafts;
+    let answers = outer.get(noticeId);
+    if (answers === undefined) {
+      answers = new Map<string, NoticeAnswerDraft>();
+      outer.set(noticeId, answers);
+    }
+    let draft = answers.get(questionId);
+    if (draft === undefined) {
+      const newDraft: NoticeAnswerDraft = { optionIds: [], customText: '', useCustom: false };
+      draft = newDraft;
+      answers.set(questionId, draft);
+    }
+    draft.customText = text;
+    draft.useCustom = text.trim().length > 0;
+  }
+
+  private isQuestionDrafted(noticeId: string, questionId: string): boolean {
+    const answers = this.noticeAnswerDrafts.get(noticeId);
+    if (answers === undefined) {
+      return false;
+    }
+    const draft = answers.get(questionId);
+    if (draft === undefined) {
+      return false;
+    }
+    return draft.optionIds.length > 0 || (draft.useCustom && draft.customText.trim().length > 0);
+  }
+
+  private noticeSelectedActionId(noticeId: string): string {
+    const map = this.noticeSelectedAction;
+    const value = map.get(noticeId);
+    return value !== undefined ? value : '';
+  }
+
+  private setNoticeSelectedAction(noticeId: string, actionId: string): void {
+    this.noticeSelectedAction.set(noticeId, actionId);
+  }
+
+  // Build the input payload for a notice action: schema-driven text fields, or
+  // the uiSchema question form when the notice is an input_request.
+  private buildNoticeInput(notice: RemoteRuntimeNotice, actionId: string): Record<string, Object> | null {
+    const form = this.noticeInputFormOf(notice);
+    if (form !== null && form.action.actionId === actionId) {
+      const drafts = this.noticeAnswerDrafts.get(notice.noticeId);
+      if (drafts === undefined) {
+        return null;
+      }
+      if (!isNoticeFormComplete(form, drafts)) {
+        return null;
+      }
+      return buildNoticeFormPayload(form, drafts);
+    }
+    const fields = this.noticeSchemaFieldsOf(notice, actionId);
+    if (fields.length === 0) {
+      return null;
+    }
+    const rawValues = new Map<string, string>();
+    for (const field of fields) {
+      rawValues.set(field.key, this.noticeFieldDraft(notice.noticeId, field.key));
+    }
+    try {
+      const action = this.findNoticeAction(notice, actionId);
+      if (action === null) {
+        return null;
+      }
+      return coerceNoticeInput(action, rawValues);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Invalid input value.';
+      this.noticeValidationErrors.set(notice.noticeId, message);
+      throw new Error(message);
+    }
+  }
+
+  private findNoticeAction(notice: RemoteRuntimeNotice, actionId: string): RemoteNoticeAction | null {
+    for (const action of notice.actions) {
+      if (action.actionId === actionId) {
+        return action;
+      }
+    }
+    return null;
+  }
+
+  private canSubmitNoticeAction(notice: RemoteRuntimeNotice, actionId: string): boolean {
+    if (this.respondingNoticeId === notice.noticeId) {
+      return false;
+    }
+    const form = this.noticeInputFormOf(notice);
+    if (form !== null && form.action.actionId === actionId) {
+      const drafts = this.noticeAnswerDrafts.get(notice.noticeId);
+      return drafts !== undefined && isNoticeFormComplete(form, drafts);
+    }
+    const fields = this.noticeSchemaFieldsOf(notice, actionId);
+    for (const field of fields) {
+      if (field.required && this.noticeFieldDraft(notice.noticeId, field.key).trim().length === 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private triggerNoticeAction(notice: RemoteRuntimeNotice, action: RemoteNoticeAction): void {
+    if (this.respondingNoticeId === notice.noticeId) {
+      return;
+    }
+    this.setNoticeSelectedAction(notice.noticeId, action.actionId);
+    const form = this.noticeInputFormOf(notice);
+    try {
+      if (form !== null && form.action.actionId === action.actionId) {
+        if (!isNoticeFormComplete(form, this.noticeAnswerDrafts.get(notice.noticeId) ?? new Map())) {
+          return;
+        }
+        this.respondNotice(notice, action.actionId, buildNoticeFormPayload(
+          form, this.noticeAnswerDrafts.get(notice.noticeId) ?? new Map()));
+        return;
+      }
+      const fields = this.noticeSchemaFieldsOf(notice, action.actionId);
+      if (fields.length > 0) {
+        const input = this.buildNoticeInput(notice, action.actionId);
+        this.respondNotice(notice, action.actionId, input);
+        return;
+      }
+      this.respondNotice(notice, action.actionId, null);
+    } catch (error) {
+      // Validation failure: the error is shown in the notice card via
+      // noticeValidationErrors, set by buildNoticeInput.
+    }
   }
 
   private addOptimisticMessage(content: string, clientMessageId: string,
@@ -430,6 +815,32 @@ export struct SessionDetailPage {
       remaining.push(item);
     }
     this.items = remaining;
+    this.syncOptimisticStore();
+    this.rebuildEntries();
+  }
+
+  // Keeps the cross-page optimistic store in step with this page's item list:
+  // after every merge/replace the store retains only the optimistic items that
+  // are still awaiting server confirmation (mirrors Android's
+  // optimisticStore.replace calls after each state reduction).
+  private syncOptimisticStore(): void {
+    if (this.sessionId.length === 0) {
+      return;
+    }
+    this.optimisticStore.sync(this.sessionId, this.items);
+  }
+
+  // Re-entry restore: pending optimistic messages written by a previous page
+  // instance are re-attached before the snapshot loads so the "sending"
+  // bubbles survive navigation. loadSnapshot()/replaceItems() then reconciles
+  // them: items confirmed by the server (matching clientMessageId) are dropped,
+  // the rest stay visible.
+  private restoreOptimisticMessages(): void {
+    const stored = this.optimisticStore.read(this.sessionId);
+    if (stored.length === 0) {
+      return;
+    }
+    this.items = stored;
     this.rebuildEntries();
   }
 
@@ -453,6 +864,10 @@ export struct SessionDetailPage {
 
   private updateCommandSuggestions(): void {
     const suggestions: RemoteRuntimeCommand[] = [];
+    if (!this.commandsAllowed()) {
+      this.commandSuggestions = suggestions;
+      return;
+    }
     const intent = parseSlashIntent(this.composerInput);
     if (intent !== null && !intent.multiline && intent.commandLike &&
       intent.suffix.length === 0 && this.commands.length > 0) {
@@ -496,20 +911,7 @@ export struct SessionDetailPage {
   }
 
   private showCommandResult(command: RemoteRuntimeCommand, result: RemoteCommandResult): void {
-    AlertDialog.show({
-      title: `/${command.id}`,
-      message: this.commandResultText(result),
-      primaryButton: {
-        value: 'OK',
-        action: (): void => {
-        }
-      },
-      secondaryButton: {
-        value: '',
-        action: (): void => {
-        }
-      }
-    });
+    showToast(`/${command.id}: ${this.commandResultText(result)}`);
   }
 
   private async runCommand(command: RemoteRuntimeCommand, intent: SlashIntent): Promise<void> {
@@ -570,7 +972,7 @@ export struct SessionDetailPage {
     }
     if (content.startsWith('/')) {
       const intent = parseSlashIntent(content);
-      if (intent !== null && !intent.multiline && intent.commandLike) {
+      if (intent !== null && !intent.multiline && intent.commandLike && this.commandsAllowed()) {
         const command = this.exactCommand(intent);
         if (command !== null) {
           await this.runCommand(command, intent);
@@ -651,6 +1053,229 @@ export struct SessionDetailPage {
     this.pendingAttachments = remaining;
   }
 
+  private mimeTypeFromName(name: string): string {
+    const dot = name.lastIndexOf('.');
+    if (dot < 0) {
+      return 'application/octet-stream';
+    }
+    const ext = name.substring(dot + 1).toLowerCase();
+    if (ext === 'png') {
+      return 'image/png';
+    }
+    if (ext === 'jpg' || ext === 'jpeg') {
+      return 'image/jpeg';
+    }
+    if (ext === 'gif') {
+      return 'image/gif';
+    }
+    if (ext === 'webp') {
+      return 'image/webp';
+    }
+    if (ext === 'txt') {
+      return 'text/plain';
+    }
+    if (ext === 'json') {
+      return 'application/json';
+    }
+    if (ext === 'pdf') {
+      return 'application/pdf';
+    }
+    if (ext === 'md') {
+      return 'text/markdown';
+    }
+    if (ext === 'zip') {
+      return 'application/zip';
+    }
+    return 'application/octet-stream';
+  }
+
+  /**
+   * Read the bytes behind a picker Uri. Picker Uris are directly accessible via
+   * fileIo without any runtime media permission, so no extra permission is added.
+   */
+  private async readUriBytes(uri: string): Promise<Uint8Array> {
+    const file = await fileIo.open(uri, fileIo.OpenMode.READ_ONLY);
+    try {
+      const stat = await fileIo.stat(file.fd);
+      const size = stat.size;
+      const arrayBuffer = new ArrayBuffer(size);
+      await fileIo.read(file.fd, arrayBuffer);
+      return new Uint8Array(arrayBuffer);
+    } finally {
+      await fileIo.close(file.fd);
+    }
+  }
+
+  private async uploadLocalUris(uris: Array<string>): Promise<void> {
+    if (this.pickingLocalFile) {
+      return;
+    }
+    if (this.pendingAttachments.length >= MAX_PENDING_ATTACHMENTS) {
+      this.errorMessage = `A message can carry at most ${MAX_PENDING_ATTACHMENTS} attachments.`;
+      return;
+    }
+    this.pickingLocalFile = true;
+    try {
+      const parts: UploadFilePart[] = [];
+      for (const uri of uris) {
+        const fileName = uri.substring(uri.lastIndexOf('/') + 1) || 'local-file';
+        const bytes = await this.readUriBytes(uri);
+        const part: UploadFilePart = {
+          fileName: fileName,
+          mediaType: this.mimeTypeFromName(fileName),
+          bytes: bytes
+        };
+        parts.push(part);
+      }
+      if (parts.length === 0) {
+        return;
+      }
+      const response = await this.sessionsApi.uploadSessionAttachments(this.serverUrl(), this.token(),
+        this.sessionId, parts);
+      const updated = this.pendingAttachments.slice(0);
+      for (const attachment of response.attachments) {
+        updated.push(attachment);
+      }
+      this.pendingAttachments = updated;
+      this.attachmentPanelOpen = false;
+      this.errorMessage = '';
+    } catch (error) {
+      showToast(errorMessageFrom(error as Object));
+      this.errorMessage = errorMessageFrom(error as Object);
+    }
+    this.pickingLocalFile = false;
+  }
+
+  private pickLocalFiles(): void {
+    const documentPicker = new picker.DocumentViewPicker();
+    documentPicker.select().then((uris: Array<string>) => {
+      this.uploadLocalUris(uris);
+    }).catch(() => {
+    });
+  }
+
+  private pickLocalImages(): void {
+    const photoPicker = new picker.PhotoViewPicker();
+    photoPicker.select({ MIMEType: picker.PhotoViewMIMETypes.IMAGE_TYPE, maxSelectNumber: 10 }).then((result: picker.PhotoSelectResult) => {
+      this.uploadLocalUris(result.photoUris);
+    }).catch(() => {
+    });
+  }
+
+  /**
+   * Launch the system camera (CameraPicker) to take a photo. CameraPicker
+   * needs no camera permission; closing the camera without shooting is
+   * silently ignored.
+   */
+  private capturePhoto(): void {
+    const pickerProfile: cameraPicker.PickerProfile = {
+      cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK
+    };
+    cameraPicker.pick(getContext(this), [cameraPicker.PickerMediaType.PHOTO], pickerProfile)
+      .then((result: cameraPicker.PickerResult) => {
+        if (result.resultCode !== 0 || result.resultUri.length === 0) {
+          return;
+        }
+        // The captured photo reuses the exact same upload path as gallery
+        // picks, so no upload logic is duplicated here.
+        this.uploadLocalUris([result.resultUri]);
+      })
+      .catch(() => {
+        // User closed the camera or no camera is available — stay silent.
+      });
+  }
+
+  private isSavingAttachment(attachment: RemoteTimelineAttachment): boolean {
+    return this.savingAttachmentId === attachment.fileId;
+  }
+
+  /**
+   * Download a non-image attachment with authentication and let the user pick
+   * where to save it via the system save picker (no storage permission
+   * needed). Image attachments keep their existing preview behaviour.
+   */
+  private async saveTimelineAttachment(attachment: RemoteTimelineAttachment): Promise<void> {
+    if (this.savingAttachmentId.length > 0) {
+      return;
+    }
+    this.savingAttachmentId = attachment.fileId;
+    try {
+      const downloaded: RemoteDownloadedAttachment = await this.sessionsApi.downloadSessionAttachment(
+        this.serverUrl(), this.token(), this.sessionId, attachment.fileId);
+      const bytes = new util.Base64Helper().decodeSync(downloaded.contentBase64);
+      if (bytes.byteLength === 0) {
+        throw new Error('The attachment did not download completely.');
+      }
+      const targetUri = await this.pickSaveLocation(attachment.name);
+      if (targetUri === null) {
+        this.savingAttachmentId = '';
+        return;
+      }
+      const file = await fileIo.open(targetUri, fileIo.OpenMode.READ_WRITE);
+      try {
+        const buffer = new ArrayBuffer(bytes.byteLength);
+        new Uint8Array(buffer).set(bytes);
+        await fileIo.write(file.fd, buffer);
+      } finally {
+        await fileIo.close(file.fd);
+      }
+      showToast($r('app.string.session_attachment_saved'));
+    } catch (error) {
+      showToast(errorMessageFrom(error as Object));
+    }
+    this.savingAttachmentId = '';
+  }
+
+  /**
+   * Open the system save picker so the user chooses where the file is
+   * written. Returns null when the user cancels the picker.
+   */
+  private async pickSaveLocation(fileName: string): Promise<string | null> {
+    const saveOptions: picker.DocumentSaveOptions = { newFileNames: [fileName] };
+    const savePicker = new picker.DocumentViewPicker();
+    try {
+      const uris = await savePicker.save(saveOptions);
+      if (uris.length === 0) {
+        return null;
+      }
+      return uris[0];
+    } catch (error) {
+      // The save sheet rejects when the user cancels; treat any picker exit
+      // as a cancel and stay silent.
+      return null;
+    }
+  }
+
+  private isDiffBlock(block: MdBlock): boolean {
+    if (block.kind !== 'code') {
+      return false;
+    }
+    if (block.language === 'diff') {
+      return true;
+    }
+    const text = block.codeText;
+    if (text.length === 0) {
+      return false;
+    }
+    const lines = text.split('\n');
+    let checked = 0;
+    for (const rawLine of lines) {
+      const line = rawLine;
+      if (line.length === 0) {
+        continue;
+      }
+      if (line.startsWith('---') || line.startsWith('+++') || line.startsWith('@@') ||
+        line.startsWith('+') || line.startsWith('-') || line.startsWith('diff ')) {
+        return true;
+      }
+      checked++;
+      if (checked >= 4) {
+        break;
+      }
+    }
+    return false;
+  }
+
   private async interruptRuntime(): Promise<void> {
     if (this.interrupting) {
       return;
@@ -689,13 +1314,15 @@ export struct SessionDetailPage {
     return true;
   }
 
-  private applyEvent(envelope: RemoteSessionEventEnvelope): void {
+  private applyEvent(envelope: RemoteSessionEventEnvelope): EventApplyOutcome {
+    const unchanged: EventApplyOutcome = { itemsChanged: false, noticesStale: false };
     if (envelope.protocolVersion !== '1.0' || envelope.sessionId !== this.sessionId) {
-      return;
+      return unchanged;
     }
     if (!this.rememberProcessedEvent(envelope.eventId)) {
-      return;
+      return unchanged;
     }
+    let itemsChanged = false;
     const payload = envelope.payload;
     if (payload.session !== null) {
       this.syncSessionMeta(payload.session);
@@ -705,29 +1332,90 @@ export struct SessionDetailPage {
       // what we already hold (mirrors Android's sequence guard).
       const currentTimelineSequence = eventCursorSequence(this.timelineEventCursor);
       if (envelope.sequence >= currentTimelineSequence) {
-        this.replaceItems(payload.items);
+        this.replaceItems(payload.items, false);
         this.timelineEventCursor = laterEventCursor(this.timelineEventCursor, envelope.cursor);
+        itemsChanged = true;
       }
     } else if (payload.items.length > 0) {
-      this.mergeItems(payload.items);
+      this.mergeItems(payload.items, false);
       this.timelineEventCursor = laterEventCursor(this.timelineEventCursor, envelope.cursor);
-      this.scrollToBottom();
+      itemsChanged = true;
     } else if (payload.item !== null) {
-      this.mergeItems([payload.item]);
+      this.mergeItems([payload.item], false);
       this.timelineEventCursor = laterEventCursor(this.timelineEventCursor, envelope.cursor);
-      this.scrollToBottom();
+      itemsChanged = true;
     }
     if (payload.state !== null) {
       this.syncStatus(payload.state.status);
     }
-    if (envelope.type.indexOf('runtime.notice') === 0) {
-      this.refreshNotices();
-    }
+    const noticesStale = envelope.type.indexOf('runtime.notice') === 0;
     const cursor = payload.eventCursor;
     if (cursor !== null && cursor.length > 0) {
       this.eventCursor = cursor;
     } else if (envelope.cursor.length > 0) {
       this.eventCursor = envelope.cursor;
+    }
+    const outcome: EventApplyOutcome = { itemsChanged: itemsChanged, noticesStale: noticesStale };
+    return outcome;
+  }
+
+  // Aggregate realtime events for EVENT_BATCH_WINDOW_MS (up to
+  // MAX_PENDING_REALTIME_EVENTS) and apply them in one pass so a burst only
+  // refreshes the UI once (mirrors Android's event batch window).
+  private enqueueRealtimeEvent(envelope: RemoteSessionEventEnvelope): void {
+    this.pendingRealtimeEvents.push(envelope);
+    if (this.pendingRealtimeEvents.length >= MAX_PENDING_REALTIME_EVENTS) {
+      this.flushRealtimeEvents();
+      return;
+    }
+    if (this.realtimeBatchTimer < 0) {
+      this.realtimeBatchTimer = setTimeout(() => {
+        this.realtimeBatchTimer = -1;
+        this.flushRealtimeEvents();
+      }, EVENT_BATCH_WINDOW_MS);
+    }
+  }
+
+  private flushRealtimeEvents(): void {
+    if (this.realtimeBatchTimer >= 0) {
+      clearTimeout(this.realtimeBatchTimer);
+      this.realtimeBatchTimer = -1;
+    }
+    if (this.pendingRealtimeEvents.length === 0) {
+      return;
+    }
+    const batch = this.pendingRealtimeEvents;
+    this.pendingRealtimeEvents = [];
+    let itemsChanged = false;
+    let noticesStale = false;
+    let sessionRefetchRequired = false;
+    let runtimeRefetchRequired = false;
+    for (const envelope of batch) {
+      if (envelope.type === 'session.refetch_required') {
+        sessionRefetchRequired = true;
+      } else if (envelope.type === 'runtime.refetch_required') {
+        runtimeRefetchRequired = true;
+      }
+      const outcome = this.applyEvent(envelope);
+      if (outcome.itemsChanged) {
+        itemsChanged = true;
+      }
+      if (outcome.noticesStale) {
+        noticesStale = true;
+      }
+    }
+    if (itemsChanged) {
+      this.rebuildEntries();
+      this.scrollToBottom();
+    }
+    if (noticesStale) {
+      this.refreshNotices();
+    }
+    if (sessionRefetchRequired) {
+      this.loadSnapshot();
+    }
+    if (runtimeRefetchRequired) {
+      this.loadRuntimeState();
     }
   }
 
@@ -738,8 +1426,23 @@ export struct SessionDetailPage {
     try {
       const recovery = await this.realtimeApi.recoverSessionEvents(this.serverUrl(), this.token(),
         this.sessionId, this.eventCursor);
+      let itemsChanged = false;
+      let noticesStale = false;
       for (const event of recovery.events) {
-        this.applyEvent(event);
+        const outcome = this.applyEvent(event);
+        if (outcome.itemsChanged) {
+          itemsChanged = true;
+        }
+        if (outcome.noticesStale) {
+          noticesStale = true;
+        }
+      }
+      if (itemsChanged) {
+        this.rebuildEntries();
+        this.scrollToBottom();
+      }
+      if (noticesStale) {
+        this.refreshNotices();
       }
       if (recovery.snapshotRequired) {
         await this.loadSnapshot();
@@ -778,7 +1481,7 @@ export struct SessionDetailPage {
       onMessage: (text: string): void => {
         const envelope = this.realtimeApi.parseSessionMessage(text);
         if (envelope !== null) {
-          this.applyEvent(envelope);
+          this.enqueueRealtimeEvent(envelope);
         }
       },
       onClose: (code: number, reason: string): void => {
@@ -810,25 +1513,25 @@ export struct SessionDetailPage {
 
   private statusColor(): string {
     if (this.statusLabel === 'running' || this.statusLabel === 'pending' || this.statusLabel === 'waiting') {
-      return '#2563EB';
+      return getColors().primaryAction;
     }
     if (this.statusLabel === 'waiting_approval' || this.statusLabel === 'blocked') {
-      return '#D97706';
+      return getColors().noticeWarning;
     }
     if (this.statusLabel === 'error' || this.statusLabel === 'failed') {
-      return '#DC2626';
+      return getColors().errorText;
     }
-    return '#16A34A';
+    return getColors().noticeSuccess;
   }
 
   private itemLabelColor(status: string): string {
     if (status === 'failed' || status === 'cancelled' || status === 'interrupted') {
-      return '#DC2626';
+      return getColors().errorText;
     }
     if (status === 'running' || status === 'pending') {
-      return '#2563EB';
+      return getColors().primaryAction;
     }
-    return '#9CA3AF';
+    return getColors().faint;
   }
 
   private itemRunning(status: string): boolean {
@@ -837,39 +1540,39 @@ export struct SessionDetailPage {
 
   private noticeSeverityColor(severity: string): string {
     if (severity === 'error') {
-      return '#DC2626';
+      return getColors().errorText;
     }
     if (severity === 'warning') {
-      return '#D97706';
+      return getColors().noticeWarning;
     }
     if (severity === 'success') {
-      return '#16A34A';
+      return getColors().noticeSuccess;
     }
-    return '#2563EB';
+    return getColors().primaryAction;
   }
 
   private actionStyleColor(style: string): string {
     if (style === 'primary') {
-      return '#2563EB';
+      return getColors().primaryAction;
     }
     if (style === 'danger') {
-      return '#DC2626';
+      return getColors().errorText;
     }
-    return '#4B5563';
+    return getColors().muted;
   }
 
   private actionStyleBackground(style: string): string {
     if (style === 'primary') {
-      return '#DBEAFE';
+      return getColors().accentSurface;
     }
     if (style === 'danger') {
-      return '#FEE2E2';
+      return getColors().errorSurface;
     }
-    return '#F3F4F6';
+    return getColors().sessionCodeSurface;
   }
 
   private realtimeDotColor(): string {
-    return this.realtimeConnected ? '#22C55E' : '#D1D5DB';
+    return this.realtimeConnected ? getColors().runtimeRunning : getColors().runtimeInactive;
   }
 
   private realtimeStatusLabel(): string {
@@ -893,11 +1596,23 @@ export struct SessionDetailPage {
   }
 
   private attachmentButtonBackground(): string {
-    return this.attachmentPanelOpen ? '#E5E7EB' : '#F3F4F6';
+    return this.attachmentPanelOpen ? getColors().secondaryActionBorder : getColors().sessionCodeSurface;
   }
 
   private attachmentUploadLabel(): string {
     return this.uploadingAttachment ? '…' : 'Add';
+  }
+
+  private localFileButtonLabel(): string {
+    return this.pickingLocalFile ? '…' : 'Choose file';
+  }
+
+  private localImageButtonLabel(): string {
+    return this.pickingLocalFile ? '…' : 'Choose image';
+  }
+
+  private cameraButtonLabel(): ResourceStr {
+    return this.pickingLocalFile ? '…' : $r('app.string.session_attachment_camera');
   }
 
   private noticeTypeLabel(notice: RemoteRuntimeNotice): string {
@@ -909,6 +1624,26 @@ export struct SessionDetailPage {
 
   private isImageAttachment(attachment: RemoteTimelineAttachment): boolean {
     return attachment.mediaType.startsWith('image/');
+  }
+
+  private openAttachmentPreview(entry: TimelineEntry, attachment: RemoteTimelineAttachment): void {
+    const images: RemoteTimelineAttachment[] = [];
+    let initialIndex = 0;
+    for (const item of entry.attachments) {
+      if (!this.isImageAttachment(item)) {
+        continue;
+      }
+      if (item.fileId === attachment.fileId) {
+        initialIndex = images.length;
+      }
+      images.push(item);
+    }
+    if (images.length === 0) {
+      return;
+    }
+    this.attachmentPreviewAttachments = images;
+    this.attachmentPreviewIndex = initialIndex;
+    this.attachmentPreviewOpen = true;
   }
 
   private attachmentSizeLabel(size: number): string {
@@ -924,39 +1659,66 @@ export struct SessionDetailPage {
   }
 
   @Builder
-  attachmentView(attachment: RemoteTimelineAttachment) {
+  attachmentView(entry: TimelineEntry, attachment: RemoteTimelineAttachment) {
     if (this.isImageAttachment(attachment)) {
-      AttachmentImageView({
-        sessionId: this.sessionId,
-        fileId: attachment.fileId
+      Column() {
+        AttachmentImageView({
+          sessionId: this.sessionId,
+          fileId: attachment.fileId
+        })
+      }
+      .width('100%')
+      .onClick(() => {
+        this.openAttachmentPreview(entry, attachment);
       })
     } else {
       Row({ space: 6 }) {
-        Text('FILE')
+        Text($r('app.string.session_file'))
           .fontSize(9)
-          .fontColor('#6B7280')
+          .fontColor(getColors().muted)
           .padding({ left: 4, right: 4, top: 1, bottom: 1 })
           .borderRadius(3)
-          .backgroundColor('#E5E7EB')
+          .backgroundColor(getColors().secondaryActionBorder)
         Column({ space: 2 }) {
           Text(attachment.name)
             .fontSize(13)
-            .fontColor('#1F2937')
+            .fontColor(getColors().ink)
             .maxLines(1)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width('100%')
+            .copyOption(CopyOptions.LocalDevice)
           Text(this.attachmentSizeLabel(attachment.size))
             .fontSize(11)
-            .fontColor('#6B7280')
+            .fontColor(getColors().muted)
         }
         .alignItems(HorizontalAlign.Start)
         .layoutWeight(1)
+        if (this.isSavingAttachment(attachment)) {
+          LoadingProgress()
+            .width(16)
+            .height(16)
+        } else {
+          Text('⇩')
+            .fontSize(15)
+            .width(28)
+            .height(28)
+            .borderRadius(14)
+            .textAlign(TextAlign.Center)
+            .backgroundColor(getColors().secondaryActionSurface)
+            .fontColor(getColors().inkSoft)
+            .onClick(() => {
+              this.saveTimelineAttachment(attachment);
+            })
+        }
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
       .padding(8)
       .borderRadius(8)
-      .backgroundColor('rgba(0,0,0,0.06)')
+      .backgroundColor(getColors().subtleSurface)
+      .onClick(() => {
+        this.saveTimelineAttachment(attachment);
+      })
     }
   }
 
@@ -964,50 +1726,60 @@ export struct SessionDetailPage {
   userContentView(entry: TimelineEntry) {
     Column({ space: 6 }) {
       ForEach(entry.attachments, (attachment: RemoteTimelineAttachment) => {
-        this.attachmentView(attachment)
+        this.attachmentView(entry, attachment)
       }, (attachment: RemoteTimelineAttachment) => attachment.fileId)
       if (entry.blocks.length > 0) {
-        AgentMarkdownView({
-          blocks: entry.blocks,
-          textColor: '#FFFFFF',
-          linkColor: '#BFDBFE',
-          inlineCodeColor: '#DBEAFE',
-          codePanelColor: '#1E3A8A',
-          codePanelTextColor: '#E5E7EB',
-          fontSize: 15
-        })
+        this.blocksView(entry.blocks, getColors().onPrimaryAction, getColors().mdLinkOnPrimary,
+          getColors().mdInlineOnPrimary, getColors().mdCodeOnPrimary, getColors().mdCodePanelText, 16.5)
       }
     }
     .alignItems(HorizontalAlign.Start)
-    .constraintSize({ maxWidth: '85%' })
-    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-    .borderRadius(12)
-    .backgroundColor('#2563EB')
+    .constraintSize({ maxWidth: '78%' })
+    .padding({ left: 17, right: 17, top: 13, bottom: 13 })
+    .borderRadius(22)
+    .backgroundColor(getColors().primaryAction)
   }
 
   @Builder
   assistantContentView(entry: TimelineEntry) {
-    Column({ space: 6 }) {
+    Column({ space: 8 }) {
       ForEach(entry.attachments, (attachment: RemoteTimelineAttachment) => {
-        this.attachmentView(attachment)
+        this.attachmentView(entry, attachment)
       }, (attachment: RemoteTimelineAttachment) => attachment.fileId)
       if (entry.blocks.length > 0) {
-        AgentMarkdownView({
-          blocks: entry.blocks,
-          textColor: '#1F2937',
-          linkColor: '#2563EB',
-          inlineCodeColor: '#C2410C',
-          codePanelColor: '#1F2937',
-          codePanelTextColor: '#E5E7EB',
-          fontSize: 15
-        })
+        this.blocksView(entry.blocks, getColors().sessionMessageText, getColors().mdLinkOnPrimary,
+          getColors().mdInlineOnSurface, getColors().mdCodeOnSurface, getColors().mdCodePanelText, 17)
       }
     }
     .alignItems(HorizontalAlign.Start)
     .constraintSize({ maxWidth: '85%' })
     .padding({ left: 12, right: 12, top: 8, bottom: 8 })
     .borderRadius(12)
-    .backgroundColor('#F2F3F5')
+    .backgroundColor(getColors().sessionMessageBubble)
+  }
+
+  /**
+   * Renders markdown blocks, routing diff code blocks to DiffCodeView while
+   * delegating everything else to AgentMarkdownView (which is not modified here).
+   */
+  @Builder
+  blocksView(blocks: MdBlock[], textColor: string, linkColor: string, inlineCodeColor: string,
+    codePanelColor: string, codePanelTextColor: string, fontSize: number) {
+    ForEach(blocks, (block: MdBlock, index: number) => {
+      if (this.isDiffBlock(block)) {
+        DiffCodeView({ codeText: block.codeText })
+      } else {
+        AgentMarkdownView({
+          blocks: [block],
+          textColor: textColor,
+          linkColor: linkColor,
+          inlineCodeColor: inlineCodeColor,
+          codePanelColor: codePanelColor,
+          codePanelTextColor: codePanelTextColor,
+          fontSize: fontSize
+        })
+      }
+    }, (block: MdBlock, index: number) => `${index}_${block.kind}_${block.language}_${block.codeText.length}`)
   }
 
   @Builder
@@ -1030,10 +1802,11 @@ export struct SessionDetailPage {
       } else {
         Text(entry.item.text)
           .fontSize(12)
-          .fontColor('#9CA3AF')
+          .fontColor(getColors().faint)
           .width('100%')
           .textAlign(TextAlign.Center)
           .padding({ top: 4, bottom: 4 })
+          .copyOption(CopyOptions.LocalDevice)
       }
     } else {
       Row({ space: 8 }) {
@@ -1044,7 +1817,7 @@ export struct SessionDetailPage {
               .fontColor(this.itemLabelColor(entry.item.status))
               .padding({ left: 6, right: 6, top: 1, bottom: 1 })
               .borderRadius(4)
-              .backgroundColor('#F3F4F6')
+              .backgroundColor(getColors().sessionCodeSurface)
             if (this.itemRunning(entry.item.status)) {
               LoadingProgress()
                 .width(12)
@@ -1053,7 +1826,7 @@ export struct SessionDetailPage {
           }
           Text(entry.item.text)
             .fontSize(13)
-            .fontColor('#4B5563')
+            .fontColor(getColors().muted)
             .maxLines(8)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width('100%')
@@ -1065,22 +1838,168 @@ export struct SessionDetailPage {
       .alignItems(VerticalAlign.Top)
       .padding(10)
       .borderRadius(10)
-      .backgroundColor('#FAFAFA')
-      .border({ width: 1, color: '#F0F0F0' })
+      .backgroundColor(getColors().subtle)
+      .border({ width: 1, color: getColors().border })
+    }
+  }
+
+  private noticeSchemaFieldsFor(notice: RemoteRuntimeNotice, actionId: string): NoticeInputField[] {
+    return this.noticeSchemaFieldsOf(notice, actionId);
+  }
+
+  private noticeFormFor(notice: RemoteRuntimeNotice): NoticeInputRequestForm | null {
+    return this.noticeInputFormOf(notice);
+  }
+
+  private noticeSchemaFieldsSelectedAction(notice: RemoteRuntimeNotice): string {
+    const selected = this.noticeSelectedActionId(notice.noticeId);
+    return this.noticeFormFor(notice) === null && selected.length > 0 ? selected : '';
+  }
+
+  private questionDraft(noticeId: string, questionId: string): NoticeAnswerDraft {
+    const answers = this.noticeAnswerDrafts.get(noticeId);
+    if (answers !== undefined) {
+      const draft = answers.get(questionId);
+      if (draft !== undefined) {
+        return draft;
+      }
+    }
+    const empty: NoticeAnswerDraft = { optionIds: [], customText: '', useCustom: false };
+    return empty;
+  }
+
+  private optionSelected(noticeId: string, questionId: string, optionId: string): boolean {
+    const draft = this.questionDraft(noticeId, questionId);
+    return draft.optionIds.indexOf(optionId) >= 0;
+  }
+
+  private formQuestionLabel(question: NoticeInputRequestQuestion): string {
+    return question.header.length > 0 ? question.header : question.prompt;
+  }
+
+  @Builder
+  noticeInputFormBuilder(notice: RemoteRuntimeNotice) {
+    if (this.noticeFormFor(notice) !== null) {
+      this.noticeFormQuestions(notice, this.noticeFormFor(notice) as NoticeInputRequestForm)
     }
   }
 
   @Builder
-  noticeView(notice: RemoteRuntimeNotice) {
+  noticeFormQuestions(notice: RemoteRuntimeNotice, form: NoticeInputRequestForm) {
+    Column({ space: 12 }) {
+      ForEach(form.questions, (question: NoticeInputRequestQuestion) => {
+        Column({ space: 6 }) {
+          Text(this.formQuestionLabel(question))
+            .fontSize(13)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(getColors().inkSoft)
+            .width('100%')
+          if (question.options.length > 0) {
+            this.noticeQuestionOptions(notice, question)
+          }
+          if (question.allowCustom) {
+            TextInput({
+              placeholder: $r('app.string.session_own_answer_placeholder'),
+              text: this.questionDraft(notice.noticeId, question.id).customText
+            })
+              .fontSize(13)
+              .height(38)
+              .width('100%')
+              .backgroundColor(getColors().matchedAccountSurface)
+              .borderRadius(8)
+              .onChange((value: string) => {
+                this.setNoticeCustomText(notice.noticeId, question.id, value);
+              })
+          }
+        }
+        .width('100%')
+      }, (question: NoticeInputRequestQuestion) => question.id)
+    }
+    .width('100%')
+    .padding({ left: 2, right: 2, top: 4 })
+  }
+
+  @Builder
+  noticeQuestionOptions(notice: RemoteRuntimeNotice, question: NoticeInputRequestQuestion) {
+    ForEach(question.options, (option: NoticeInputRequestOption) => {
+      Row({ space: 8 }) {
+        Radio({ value: option.id, group: notice.noticeId + ':' + question.id })
+          .checked(this.optionSelected(notice.noticeId, question.id, option.id))
+          .onChange((isChecked: boolean) => {
+            this.toggleNoticeOption(notice.noticeId, question.id, option.id, question.multiple);
+          })
+        Column({ space: 2 }) {
+          Text(option.label)
+            .fontSize(13)
+            .fontColor(getColors().ink)
+          if (option.description.length > 0) {
+            Text(option.description)
+              .fontSize(12)
+              .fontColor(getColors().muted)
+          }
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+      }
+      .width('100%')
+    }, (option: NoticeInputRequestOption) => option.id)
+  }
+
+  @Builder
+  noticeSchemaFieldsSelected(notice: RemoteRuntimeNotice) {
+    if (this.noticeSchemaFieldsSelectedAction(notice).length > 0) {
+      this.noticeSchemaFieldsBuilder(notice, this.noticeSchemaFieldsSelectedAction(notice))
+    }
+  }
+
+  @Builder
+  noticeSchemaFieldsBuilder(notice: RemoteRuntimeNotice, actionId: string) {
+    if (this.noticeSchemaFieldsFor(notice, actionId).length > 0) {
+      this.noticeSchemaFieldRows(notice, actionId, this.noticeSchemaFieldsFor(notice, actionId))
+    }
+  }
+
+  @Builder
+  noticeSchemaFieldRows(notice: RemoteRuntimeNotice, actionId: string, fields: NoticeInputField[]) {
     Column({ space: 8 }) {
+      ForEach(fields, (field: NoticeInputField) => {
+        Column({ space: 4 }) {
+          Text(field.label)
+            .fontSize(12)
+            .fontColor(getColors().muted)
+          TextInput({
+            placeholder: field.label,
+            text: this.noticeFieldDraft(notice.noticeId, field.key)
+          })
+            .fontSize(13)
+            .height(38)
+            .width('100%')
+            .backgroundColor(getColors().matchedAccountSurface)
+            .borderRadius(8)
+            .type(field.type === 'integer' || field.type === 'number' ? InputType.Number : InputType.Normal)
+            .onChange((value: string) => {
+              this.setNoticeFieldDraft(notice.noticeId, field.key, value);
+            })
+        }
+        .width('100%')
+      }, (field: NoticeInputField) => field.key)
+    }
+    .width('100%')
+    .padding({ left: 2, right: 2, top: 4 })
+  }
+
+  @Builder
+  noticeView(notice: RemoteRuntimeNotice) {
+    Column({ space: 11 }) {
       Row({ space: 6 }) {
         Circle()
           .width(8)
           .height(8)
           .fill(this.noticeSeverityColor(notice.severity))
         Text(notice.title)
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
+          .fontSize(14)
+          .fontWeight(600)
+          .fontColor(getColors().ink)
           .layoutWeight(1)
         Text(this.noticeTypeLabel(notice))
           .fontSize(11)
@@ -1090,41 +2009,54 @@ export struct SessionDetailPage {
       if (notice.message !== null && notice.message.length > 0) {
         Text(notice.message)
           .fontSize(13)
-          .fontColor('#4B5563')
+          .lineHeight(18)
+          .fontColor(getColors().muted)
           .width('100%')
       }
-      Row({ space: 8 }) {
-        ForEach(notice.actions, (action: RemoteNoticeAction) => {
-          Button(action.label)
-            .fontSize(13)
-            .height(34)
-            .padding({ left: 14, right: 14 })
-            .fontColor(this.actionStyleColor(action.style))
-            .backgroundColor(this.actionStyleBackground(action.style))
-            .enabled(this.respondingNoticeId !== notice.noticeId)
-            .onClick(() => {
-              this.respondNotice(notice, action.actionId);
-            })
-        }, (action: RemoteNoticeAction) => action.actionId)
-        if (this.respondingNoticeId === notice.noticeId) {
-          LoadingProgress()
-            .width(18)
-            .height(18)
-        }
+      this.noticeInputFormBuilder(notice)
+      this.noticeSchemaFieldsSelected(notice)
+      if (this.noticeValidationErrors.has(notice.noticeId)) {
+        Text(this.noticeValidationErrors.get(notice.noticeId))
+          .fontSize(12)
+          .fontColor(getColors().errorText)
+          .width('100%')
       }
-      .width('100%')
+      if (this.capabilityAllowed(SESSION_NOTICE_RESPONSE_CAPABILITY)) {
+        Row({ space: 8 }) {
+          ForEach(notice.actions, (action: RemoteNoticeAction) => {
+            Button(action.label)
+              .fontSize(12)
+              .fontWeight(600)
+              .height(34)
+              .padding({ left: 14, right: 14 })
+              .fontColor(this.actionStyleColor(action.style))
+              .backgroundColor(this.actionStyleBackground(action.style))
+              .enabled(this.canSubmitNoticeAction(notice, action.actionId))
+              .onClick(() => {
+                this.triggerNoticeAction(notice, action);
+              })
+          }, (action: RemoteNoticeAction) => action.actionId)
+          if (this.respondingNoticeId === notice.noticeId) {
+            LoadingProgress()
+              .width(18)
+              .height(18)
+          }
+        }
+        .width('100%')
+      }
     }
     .width('100%')
     .alignItems(HorizontalAlign.Start)
-    .padding(12)
-    .borderRadius(12)
-    .backgroundColor('#FFFBEB')
-    .border({ width: 1, color: '#FDE68A' })
+    .padding(14)
+    .borderRadius(RadiusTokens.noticeCard)
+    .backgroundColor(getColors().warningSurface)
+    .border({ width: 1, color: getColors().warningBorder })
   }
 
   build() {
     NavDestination() {
-      Column() {
+      Stack() {
+        Column() {
         Row({ space: 8 }) {
           Text(`${this.runtimeLabel} · ${this.statusLabel}`)
             .fontSize(12)
@@ -1136,14 +2068,14 @@ export struct SessionDetailPage {
             .fill(this.realtimeDotColor())
           Text(this.realtimeStatusLabel())
             .fontSize(11)
-            .fontColor('#9CA3AF')
+            .fontColor(getColors().faint)
         }
         .width('100%')
         .padding({ left: 16, right: 16, top: 4, bottom: 4 })
         if (this.errorMessage.length > 0) {
           Text(this.errorMessage)
             .fontSize(12)
-            .fontColor('#D93025')
+            .fontColor(getColors().errorText)
             .width('100%')
             .padding({ left: 16, right: 16 })
         }
@@ -1163,8 +2095,8 @@ export struct SessionDetailPage {
                 Button(this.historyButtonLabel())
                   .fontSize(12)
                   .height(30)
-                  .backgroundColor('#F3F4F6')
-                  .fontColor('#374151')
+                  .backgroundColor(getColors().sessionCodeSurface)
+                  .fontColor(getColors().inkSoft)
                   .enabled(!this.loadingHistory)
                   .onClick(() => {
                     this.loadHistory();
@@ -1174,9 +2106,9 @@ export struct SessionDetailPage {
             }
             if (this.entries.length === 0) {
               ListItem() {
-                Text('No messages yet. Say hello to start.')
+                Text($r('app.string.session_no_messages'))
                   .fontSize(14)
-                  .fontColor('#999999')
+                  .fontColor(getColors().faint)
                   .width('100%')
                   .textAlign(TextAlign.Center)
                   .padding({ top: 24, bottom: 24 })
@@ -1203,11 +2135,11 @@ export struct SessionDetailPage {
               Row({ space: 8 }) {
                 Text(`/${command.id}`)
                   .fontSize(13)
-                  .fontColor('#1F2937')
+                  .fontColor(getColors().ink)
                   .fontFamily('monospace')
                 Text(command.title)
                   .fontSize(12)
-                  .fontColor('#6B7280')
+                  .fontColor(getColors().muted)
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .layoutWeight(1)
@@ -1222,8 +2154,8 @@ export struct SessionDetailPage {
           .width('100%')
           .padding({ left: 12, right: 12 })
           .borderRadius(10)
-          .backgroundColor('#FFFFFF')
-          .border({ width: 1, color: '#E5E7EB' })
+          .backgroundColor(getColors().canvas)
+          .border({ width: 1, color: getColors().border })
         }
         if (this.pendingAttachments.length > 0) {
           Flex({ wrap: FlexWrap.Wrap }) {
@@ -1231,13 +2163,14 @@ export struct SessionDetailPage {
               Row({ space: 4 }) {
                 Text(attachment.name)
                   .fontSize(11)
-                  .fontColor('#1F2937')
+                  .fontColor(getColors().ink)
                   .maxLines(1)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .constraintSize({ maxWidth: 140 })
+                  .copyOption(CopyOptions.LocalDevice)
                 Text('✕')
                   .fontSize(11)
-                  .fontColor('#6B7280')
+                  .fontColor(getColors().muted)
                   .padding({ left: 2, right: 2 })
                   .onClick(() => {
                     this.removePendingAttachment(attachment.fileId);
@@ -1245,7 +2178,7 @@ export struct SessionDetailPage {
               }
               .padding({ left: 8, right: 8, top: 4, bottom: 4 })
               .borderRadius(12)
-              .backgroundColor('#E5E7EB')
+              .backgroundColor(getColors().secondaryActionBorder)
               .margin({ right: 6, bottom: 4 })
             }, (attachment: RemoteUploadedAttachment) => attachment.fileId)
           }
@@ -1254,16 +2187,16 @@ export struct SessionDetailPage {
         }
         if (this.attachmentPanelOpen) {
           Column({ space: 8 }) {
-            Text('Add an attachment from a direct file URL (max 25 MB).')
+            Text($r('app.string.session_add_attachment_url'))
               .fontSize(11)
-              .fontColor('#6B7280')
+              .fontColor(getColors().muted)
               .width('100%')
             Row({ space: 8 }) {
-              TextInput({ text: this.attachmentUrlInput, placeholder: 'https://example.com/image.png' })
+              TextInput({ text: this.attachmentUrlInput, placeholder: $r('app.string.session_attachment_url_placeholder') })
                 .fontSize(13)
                 .height(36)
                 .layoutWeight(1)
-                .backgroundColor('#F8FAFC')
+                .backgroundColor(getColors().matchedAccountSurface)
                 .borderRadius(18)
                 .padding({ left: 12, right: 12 })
                 .onChange((value: string) => {
@@ -1273,8 +2206,8 @@ export struct SessionDetailPage {
                 .fontSize(13)
                 .height(36)
                 .padding({ left: 14, right: 14 })
-                .backgroundColor('#2563EB')
-                .fontColor('#FFFFFF')
+                .backgroundColor(getColors().primaryAction)
+                .fontColor(getColors().onPrimaryAction)
                 .enabled(!this.uploadingAttachment)
                 .onClick(() => {
                   this.addAttachmentFromUrl();
@@ -1282,47 +2215,96 @@ export struct SessionDetailPage {
             }
             .width('100%')
             .alignItems(VerticalAlign.Center)
-            Text('Uploading files from this device is not available yet.')
-              .fontSize(11)
-              .fontColor('#9CA3AF')
-              .width('100%')
+            Row({ space: 8 }) {
+              Button(this.localFileButtonLabel())
+                .fontSize(13)
+                .height(36)
+                .padding({ left: 14, right: 14 })
+                .backgroundColor(getColors().secondaryActionSurface)
+                .fontColor(getColors().ink)
+                .enabled(!this.pickingLocalFile)
+                .onClick(() => {
+                  this.pickLocalFiles();
+                })
+              Button(this.localImageButtonLabel())
+                .fontSize(13)
+                .height(36)
+                .padding({ left: 14, right: 14 })
+                .backgroundColor(getColors().secondaryActionSurface)
+                .fontColor(getColors().ink)
+                .enabled(!this.pickingLocalFile)
+                .onClick(() => {
+                  this.pickLocalImages();
+                })
+              Button(this.cameraButtonLabel())
+                .fontSize(13)
+                .height(36)
+                .padding({ left: 14, right: 14 })
+                .backgroundColor(getColors().secondaryActionSurface)
+                .fontColor(getColors().ink)
+                .enabled(!this.pickingLocalFile)
+                .onClick(() => {
+                  this.capturePhoto();
+                })
+            }
+            .width('100%')
+            .alignItems(VerticalAlign.Center)
           }
           .width('100%')
           .padding(12)
           .borderRadius(10)
-          .backgroundColor('#FFFFFF')
-          .border({ width: 1, color: '#E5E7EB' })
+          .backgroundColor(getColors().canvas)
+          .border({ width: 1, color: getColors().border })
+        }
+        if (this.capabilities !== null) {
+          Row({ space: 8 }) {
+            Text($r('app.string.session_takeover_label'))
+              .fontSize(13)
+              .fontColor(getColors().ink)
+              .layoutWeight(1)
+            Toggle({ type: ToggleType.Switch, isOn: this.takeoverOn })
+              .hitTestBehavior(HitTestMode.None)
+          }
+          .width('100%')
+          .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+          .onClick(() => {
+            this.requestTakeoverChange(!this.takeoverOn);
+          })
         }
         Row({ space: 8 }) {
-          Button(this.attachmentButtonLabel())
+          if (this.capabilityAllowed(SESSION_ATTACHMENT_CAPABILITY)) {
+            Button(this.attachmentButtonLabel())
+              .fontSize(16)
+              .width(36)
+              .height(36)
+              .borderRadius(18)
+              .backgroundColor(this.attachmentButtonBackground())
+              .fontColor(getColors().inkSoft)
+              .onClick(() => {
+                this.attachmentPanelOpen = !this.attachmentPanelOpen;
+              })
+          }
+          TextArea({ text: this.composerInput, placeholder: $r('app.string.session_message_placeholder') })
             .fontSize(16)
-            .width(36)
-            .height(36)
-            .borderRadius(18)
-            .backgroundColor(this.attachmentButtonBackground())
-            .fontColor('#374151')
-            .onClick(() => {
-              this.attachmentPanelOpen = !this.attachmentPanelOpen;
-            })
-          TextArea({ text: this.composerInput, placeholder: 'Message the agent…' })
-            .fontSize(14)
+            .fontWeight(500)
             .height(40)
             .layoutWeight(1)
-            .backgroundColor('#F8FAFC')
+            .backgroundColor(getColors().matchedAccountSurface)
             .borderRadius(20)
             .padding({ left: 12, right: 12, top: 8 })
+            .enabled(this.sendInputAllowed())
             .onChange((value: string) => {
               this.composerInput = value;
               this.updateCommandSuggestions();
             })
-          if (this.canInterrupt) {
+          if (this.canInterrupt && this.capabilityAllowed(SESSION_INTERRUPT_CAPABILITY)) {
             Button(this.interruptButtonLabel())
               .fontSize(16)
               .width(40)
               .height(40)
               .borderRadius(20)
-              .backgroundColor('#FEE2E2')
-              .fontColor('#DC2626')
+              .backgroundColor(getColors().errorSurface)
+              .fontColor(getColors().errorText)
               .enabled(!this.interrupting)
               .onClick(() => {
                 this.interruptRuntime();
@@ -1333,9 +2315,9 @@ export struct SessionDetailPage {
               .width(40)
               .height(40)
               .borderRadius(20)
-              .backgroundColor('#2563EB')
-              .fontColor('#FFFFFF')
-              .enabled(!this.sending && !this.executingCommand)
+              .backgroundColor(getColors().primaryAction)
+              .fontColor(getColors().onPrimaryAction)
+              .enabled(!this.sending && !this.executingCommand && this.sendInputAllowed())
               .onClick(() => {
                 this.sendMessage();
               })
@@ -1344,6 +2326,46 @@ export struct SessionDetailPage {
         .width('100%')
         .alignItems(VerticalAlign.Center)
         .padding({ left: 12, right: 12, top: 8, bottom: 12 })
+        Row() {
+          Button($r('app.string.session_agent_files'))
+            .fontSize(13)
+            .height(36)
+            .padding({ left: 14, right: 14 })
+            .backgroundColor(getColors().secondaryActionSurface)
+            .fontColor(getColors().ink)
+            .onClick(() => {
+              this.navPathStack.pushPathByName('session_agent_files', this.sessionId);
+            })
+          Button('Share')
+            .fontSize(13)
+            .height(36)
+            .padding({ left: 14, right: 14 })
+            .backgroundColor(getColors().secondaryActionSurface)
+            .fontColor(getColors().ink)
+            .enabled(!this.shareBusy)
+            .onClick(() => {
+              this.shareSession();
+            })
+        }
+        .width('100%')
+        .padding({ left: 12, right: 12, bottom: 4 })
+      }
+      .width('100%')
+      .height('100%')
+
+        if (this.attachmentPreviewOpen) {
+          AttachmentPreviewOverlay({
+            sessionId: this.sessionId,
+            attachments: this.attachmentPreviewAttachments,
+            initialIndex: this.attachmentPreviewIndex,
+            onSave: (attachment: RemoteTimelineAttachment): void => {
+              this.saveTimelineAttachment(attachment);
+            },
+            onClose: (): void => {
+              this.attachmentPreviewOpen = false;
+            }
+          })
+        }
       }
       .width('100%')
       .height('100%')
@@ -1357,6 +2379,7 @@ export struct SessionDetailPage {
       }
       if (this.sessionId.length > 0) {
         this.pageActive = true;
+        this.restoreOptimisticMessages();
         this.loadSnapshot();
         this.loadRuntimeState();
         this.loadRuntimeCommands();

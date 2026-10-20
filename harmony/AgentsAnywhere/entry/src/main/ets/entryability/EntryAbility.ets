@@ -13,23 +13,67 @@
  * limitations under the License.
  */
 
-import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
+import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { AuthSessionStore } from '../auth/AuthSessionStore';
 import { AnnouncementReadStore } from '../auth/AnnouncementReadStore';
 import { AppUpdateIgnoreStore } from '../auth/AppUpdateIgnoreStore';
+import { NewSessionPreferenceStore } from '../auth/NewSessionPreferenceStore';
+import { SidebarViewModeStore } from '../auth/SidebarViewModeStore';
+import { APP_IS_DARK_KEY, APP_MODE_KEY } from '../designsystem/ColorTokens';
+import { AppearanceSettings } from '../designsystem/AppearanceSettings';
+import { LanguageSettings } from '../i18n/LanguageSettings';
 
 const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
   onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
     try {
+      // Keep the OS-level color mode following the system (NOT_SET). The actual
+      // light/dark decision for our design tokens is resolved through AppStorage.
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }
+    // Initialize the design-system theme state. Default to following the system.
+    AppStorage.setOrCreate<string>(APP_MODE_KEY, 'system');
+    AppStorage.setOrCreate<boolean>(APP_IS_DARK_KEY, this.resolveIsDark());
+    // Initialize the user language preference and apply it to the i18n subsystem.
+    LanguageSettings.getInstance().init(this.context);
+    LanguageSettings.getInstance().loadAndApply();
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
+  }
+
+  // Resolve the *effective* dark state from the system configuration. This is the
+  // value used by getColors() when appMode is 'system'.
+  private resolveIsDark(): boolean {
+    try {
+      const mode = this.context.config.colorMode;
+      if (mode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK) {
+        return true;
+      }
+      if (mode === ConfigurationConstant.ColorMode.COLOR_MODE_LIGHT) {
+        return false;
+      }
+    } catch (err) {
+      hilog.error(DOMAIN, 'testTag', 'Failed to read colorMode. Cause: %{public}s', JSON.stringify(err));
+    }
+    return false;
+  }
+
+  // Push the resolved dark state into AppStorage so subscribed pages re-render.
+  private syncTheme(): void {
+    try {
+      const mode = AppStorage.get<string>(APP_MODE_KEY);
+      if (mode !== 'light' && mode !== 'dark') {
+    AppStorage.setOrCreate<boolean>(APP_IS_DARK_KEY, this.resolveIsDark());
+    AppearanceSettings.getInstance().init(this.context);
+    AppearanceSettings.getInstance().loadAndApply();
+      }
+    } catch (err) {
+      // Leave the stored value untouched if AppStorage is unavailable.
+    }
   }
 
   onDestroy(): void {
@@ -43,6 +87,11 @@ export default class EntryAbility extends UIAbility {
     AuthSessionStore.getInstance().init(this.context);
     AnnouncementReadStore.getInstance().init(this.context);
     AppUpdateIgnoreStore.getInstance().init(this.context);
+    NewSessionPreferenceStore.getInstance().init(this.context);
+    SidebarViewModeStore.getInstance().init(this.context);
+    SidebarViewModeStore.getInstance().loadAndApply();
+    // Ensure the resolved theme flag matches the system when following it.
+    this.syncTheme();
     windowStage.loadContent('pages/Index', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
@@ -50,6 +99,15 @@ export default class EntryAbility extends UIAbility {
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
     });
+  }
+
+  // Re-sync the effective dark state whenever the system configuration (e.g. the
+  // OS dark-mode setting) changes. Pages subscribed to APP_IS_DARK_KEY re-render.
+  onConfigurationUpdate(newConfig: Configuration): void {
+    this.syncTheme();
+    // Re-apply the language preference (a no-op when following the system, which
+    // already re-resolves qualifier resources on its own).
+    LanguageSettings.getInstance().loadAndApply();
   }
 
   onWindowStageDestroy(): void {

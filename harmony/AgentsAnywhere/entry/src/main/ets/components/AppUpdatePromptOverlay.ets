@@ -1,7 +1,9 @@
+import { APP_IS_DARK_KEY, getColors } from '../designsystem/ColorTokens';
+
 @Component
 export struct AppUpdatePromptOverlay {
+  @StorageProp(APP_IS_DARK_KEY) themeIsDark: boolean = false;
   versionName: string = '';
-  downloadUrl: string = '';
   onDownload: () => void = () => {};
   onIgnore: () => void = () => {};
 
@@ -11,38 +13,42 @@ export struct AppUpdatePromptOverlay {
       }
       .width('100%')
       .height('100%')
-      .backgroundColor('rgba(0,0,0,0.45)')
+      .backgroundColor(this.themeIsDark ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.4)')
       .onClick(() => {
         this.onIgnore();
       })
-      Column({ space: 14 }) {
-        Text('Update available')
-          .fontSize(18)
-          .fontWeight(FontWeight.Bold)
-          .fontColor('#111827')
+      Column({ space: 16 }) {
+        Text($r('app.string.update_available_title'))
+          .fontSize(20)
+          .fontWeight(600)
+          .lineHeight(24)
+          .fontColor(getColors().ink)
           .width('100%')
-        Text(`A new version ${this.versionName} is available. Open the download page in your browser and install the update manually.`)
+        Text($r('app.string.update_available_message', this.versionName))
           .fontSize(14)
-          .fontColor('#4B5563')
+          .fontWeight(FontWeight.Medium)
+          .fontColor(getColors().muted)
           .width('100%')
           .lineHeight(20)
         Row({ space: 10 }) {
-          Button('Ignore')
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
-            .fontColor('#374151')
-            .backgroundColor('#F2F3F5')
-            .height(42)
+          Button($r('app.string.update_ignore_version'))
+            .fontSize(14)
+            .fontWeight(600)
+            .fontColor(getColors().ink)
+            .backgroundColor(getColors().secondaryActionSurface)
+            .height(46)
+            .borderRadius(14)
             .layoutWeight(1)
             .onClick(() => {
               this.onIgnore();
             })
-          Button('Download')
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(Color.White)
-            .backgroundColor('#2563EB')
-            .height(42)
+          Button($r('app.string.update_now'))
+            .fontSize(14)
+            .fontWeight(600)
+            .fontColor(getColors().onPrimaryAction)
+            .backgroundColor(getColors().primaryAction)
+            .height(46)
+            .borderRadius(14)
             .layoutWeight(1)
             .onClick(() => {
               this.onDownload();
@@ -51,9 +57,10 @@ export struct AppUpdatePromptOverlay {
         .width('100%')
       }
       .width('86%')
-      .padding(18)
-      .borderRadius(16)
-      .backgroundColor(Color.White)
+      .padding(20)
+      .borderRadius(20)
+      .backgroundColor(getColors().dialogSurface)
+      .border({ width: 1, color: getColors().border })
     }
     .width('100%')
     .height('100%')

@@ -6,6 +6,11 @@
       "buildFunction": "SessionDetailPageBuilder"
     },
     {
+      "name": "session_agent_files",
+      "pageSourceFile": "src/main/ets/pages/SessionAgentFilesPage.ets",
+      "buildFunction": "SessionAgentFilesPageBuilder"
+    },
+    {
       "name": "devices",
       "pageSourceFile": "src/main/ets/pages/DevicesPage.ets",
       "buildFunction": "DevicesPageBuilder"
@@ -21,9 +26,19 @@
       "buildFunction": "FilesPageBuilder"
     },
     {
-      "name": "profile",
-      "pageSourceFile": "src/main/ets/pages/ProfilePage.ets",
-      "buildFunction": "ProfilePageBuilder"
+      "name": "pairing",
+      "pageSourceFile": "src/main/ets/pages/DevicePairingPage.ets",
+      "buildFunction": "DevicePairingPageBuilder"
+    },
+    {
+      "name": "archived_sessions",
+      "pageSourceFile": "src/main/ets/pages/ArchivedSessionsPage.ets",
+      "buildFunction": "ArchivedSessionsPageBuilder"
+    },
+    {
+      "name": "new_project",
+      "pageSourceFile": "src/main/ets/pages/NewProjectPage.ets",
+      "buildFunction": "NewProjectPageBuilder"
     }
   ]
 }
