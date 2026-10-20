@@ -3068,6 +3068,8 @@ export struct HomePage {
           SymbolGlyph($r('sys.symbol.chevron_left'))
             .fontSize(19)
             .fontColor([this.treeFiltersActive() ? getColors().inkSoft : getColors().faint])
+            .rotate({ angle: this.filterMenuVisible ? -90 : 0 })
+            .animation({ duration: 150, curve: Curve.FastOutSlowIn })
         }
         .width(38)
         .height(38)
@@ -3075,6 +3077,7 @@ export struct HomePage {
         .padding(0)
         .backgroundColor(Color.Transparent)
         .id(filterButtonId)
+        .accessibilityText($r('app.string.home_project_filter_sessions'))
         .onClick(() => {
           this.openFilterMenu(filterButtonId);
         })
@@ -3430,13 +3433,16 @@ export struct HomePage {
         Button() {
           SymbolGlyph($r('sys.symbol.chevron_left'))
             .fontSize(19)
-            .fontColor([getColors().faint])
+            .fontColor([this.treeFiltersActive() ? getColors().inkSoft : getColors().faint])
+            .rotate({ angle: this.filterMenuVisible ? -90 : 0 })
+            .animation({ duration: 150, curve: Curve.FastOutSlowIn })
         }
         .width(38)
         .height(38)
         .borderRadius(19)
         .padding(0)
         .backgroundColor(Color.Transparent)
+        .accessibilityText($r('app.string.home_project_filter_sessions'))
         .id('home_filter_button_empty')
         .onClick(() => {
           this.openFilterMenu('home_filter_button_empty');
