@@ -205,16 +205,6 @@ export struct NewSessionSheetOverlay {
   }
 
   @Builder
-  optionRow(options: NewSessionCatalogOption[], onSelected: (id: string) => void) {
-    Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
-      ForEach(options, (option: NewSessionCatalogOption) => {
-        this.optionChip(option, onSelected)
-      }, (option: NewSessionCatalogOption) => `${option.id}:${option.selected}`)
-    }
-    .width('100%')
-  }
-
-  @Builder
   catalogLoadingRow() {
     Row({ space: 8 }) {
       LoadingProgress()
@@ -267,16 +257,26 @@ export struct NewSessionSheetOverlay {
       } else if (this.catalog.modelUnavailable || this.catalog.models.length === 0) {
         this.catalogUnavailableRow()
       } else {
-        this.optionRow(this.catalog.models, (id: string) => {
-          this.onModelSelected(id);
-        })
+        Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
+          ForEach(this.catalog.models, (option: NewSessionCatalogOption) => {
+            this.optionChip(option, (id: string) => {
+              this.onModelSelected(id);
+            })
+          }, (option: NewSessionCatalogOption) => `${option.id}:${option.selected}`)
+        }
+        .width('100%')
       }
       if (!this.catalog.loading && this.catalog.errorText.length === 0 &&
         !this.catalog.modelUnavailable && this.catalog.efforts.length > 0) {
         this.sectionLabel($r('app.string.new_session_reasoning'))
-        this.optionRow(this.catalog.efforts, (id: string) => {
-          this.onEffortSelected(id);
-        })
+        Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
+          ForEach(this.catalog.efforts, (option: NewSessionCatalogOption) => {
+            this.optionChip(option, (id: string) => {
+              this.onEffortSelected(id);
+            })
+          }, (option: NewSessionCatalogOption) => `${option.id}:${option.selected}`)
+        }
+        .width('100%')
       }
       this.sectionLabel($r('app.string.new_session_permission'))
       if (this.catalog.loading) {
@@ -286,9 +286,14 @@ export struct NewSessionSheetOverlay {
       } else if (this.catalog.permissionUnavailable || this.catalog.permissions.length === 0) {
         this.catalogUnavailableRow()
       } else {
-        this.optionRow(this.catalog.permissions, (id: string) => {
-          this.onPermissionSelected(id);
-        })
+        Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
+          ForEach(this.catalog.permissions, (option: NewSessionCatalogOption) => {
+            this.optionChip(option, (id: string) => {
+              this.onPermissionSelected(id);
+            })
+          }, (option: NewSessionCatalogOption) => `${option.id}:${option.selected}`)
+        }
+        .width('100%')
       }
     }
     .width('100%')
@@ -348,7 +353,7 @@ export struct NewSessionSheetOverlay {
   browserPanel() {
     Column({ space: 8 }) {
       Row({ space: 8 }) {
-        Text(this.browser.path.length > 0 ? this.browser.path : '~')
+        Text(this.browser.path.length > 0 ? this.browser.path : $r('app.string.files_windows_drives'))
           .fontSize(12)
           .fontColor(getColors().muted)
           .maxLines(1)
@@ -417,7 +422,7 @@ export struct NewSessionSheetOverlay {
         .padding({ left: 14, right: 14 })
         .backgroundColor(getColors().primaryAction)
         .fontColor(getColors().onPrimaryAction)
-        .enabled(!this.browser.loading)
+        .enabled(!this.browser.loading && this.browser.path.length > 0)
         .onClick(() => {
           this.onUseDirectory();
         })

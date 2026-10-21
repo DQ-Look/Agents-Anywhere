@@ -13,6 +13,7 @@ export struct EmptyState {
   glyph: ResourceStr = '\u{1F4DD}';
   message: ResourceStr = '';
   actionLabel?: ResourceStr;
+  actionSymbol: Resource = $r('sys.symbol.plus');
   onAction?: () => void;
 
   build() {
@@ -30,7 +31,7 @@ export struct EmptyState {
         .constraintSize({ maxWidth: 294 })
       if (this.actionLabel !== undefined && this.actionLabel !== '' && this.onAction !== undefined) {
         Row({ space: 8 }) {
-          SymbolGlyph($r('sys.symbol.plus'))
+          SymbolGlyph(this.actionSymbol)
             .fontSize(17)
             .fontColor([getColors().onPrimaryAction])
           Text(this.actionLabel)

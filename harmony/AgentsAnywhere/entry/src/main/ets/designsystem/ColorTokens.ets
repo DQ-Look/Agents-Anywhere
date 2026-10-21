@@ -85,6 +85,7 @@ export interface ColorSet {
   // Android pattern of tinting surfaces with semantic accent colors)
   accentSurface: string;
   successSurface: string;
+  successBorder: string;
   warningSurface: string;
   warningBorder: string;
   accentPurple: string;
@@ -161,6 +162,7 @@ export const LightColors: ColorSet = {
 
   accentSurface: '#0D0A0A0B',
   successSurface: '#0D16A34A',
+  successBorder: '#5216A34A',
   warningSurface: '#0DD97706',
   warningBorder: '#52D97706',
   accentPurple: '#7C3AED',
@@ -234,6 +236,7 @@ export const DarkColors: ColorSet = {
 
   accentSurface: '#0DFAFAFA',
   successSurface: '#0D22C55E',
+  successBorder: '#5222C55E',
   warningSurface: '#0DF59E0B',
   warningBorder: '#52F59E0B',
   accentPurple: '#A78BFA',
