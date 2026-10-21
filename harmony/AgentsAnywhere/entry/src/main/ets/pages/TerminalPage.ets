@@ -10,6 +10,7 @@ import { SharedApiClient } from '../api/SharedApiClient';
 import { RemoteTerminal, TerminalApi } from '../api/TerminalApi';
 import { AuthSessionStore } from '../auth/AuthSessionStore';
 import { errorMessageFrom } from '../common/ApiException';
+import { NetworkMonitor } from '../common/NetworkMonitor';
 import { objGetOptNumber, objGetString, parseJsonRecord } from '../common/Json';
 import { TerminalEmulator } from '../common/TerminalEmulator';
 import { TerminalChunkDataSource, TerminalChunkRow, TerminalRenderBuilder, TerminalSegment } from '../common/TerminalRender';
@@ -140,6 +141,7 @@ export struct TerminalPage {
   private navPathStack: NavPathStack = new NavPathStack();
   private scroller: Scroller = new Scroller();
   private socket: RealtimeWebSocket = new RealtimeWebSocket();
+  private networkMonitor: NetworkMonitor = new NetworkMonitor();
   private authStore: AuthSessionStore = AuthSessionStore.getInstance();
   private client: ApiClient = SharedApiClient.getInstance();
   private devicesApi: DevicesApi = new DevicesApi(this.client);
@@ -147,6 +149,7 @@ export struct TerminalPage {
   private resizeDebounce: number = -1;
 
   aboutToDisappear(): void {
+    this.networkMonitor.stop();
     this.socket.destroy();
     if (this.resizeDebounce >= 0) {
       clearTimeout(this.resizeDebounce);
@@ -417,6 +420,17 @@ export struct TerminalPage {
     setTimeout(() => {
       this.connectStream(this.lastSeq);
     }, 1000);
+  }
+
+  /**
+   * Connectivity just returned: reconnect the terminal stream immediately when
+   * it is down, instead of waiting for the next 1s retry tick.
+   */
+  private onNetworkRestored(): void {
+    if (this.exited || this.connected) {
+      return;
+    }
+    this.connectStream(this.lastSeq);
   }
 
   private handleFrame(text: string): void {
@@ -1016,6 +1030,11 @@ export struct TerminalPage {
       if (typeof raw === 'string' && raw.length > 0) {
         this.deviceId = raw;
       }
+      this.networkMonitor.start({
+        onNetworkAvailable: (): void => {
+          this.onNetworkRestored();
+        }
+      });
       this.startTerminal();
     })
   }

@@ -1,4 +1,4 @@
-# 鸿蒙 vs 安卓 功能对齐状态（2026-10-21 第二十一轮更新）
+# 鸿蒙 vs 安卓 功能对齐状态（2026-10-21 第二十二轮更新）
 
 调查对象：`android/`（Kotlin 参考端）与 `harmony/AgentsAnywhere`（ArkTS，API 26）。
 本文档为**当前状态快照**：此前多轮差距清单中的项目已按批次实现并逐批通过 `devecocli build` 验证。每批实现均以安卓源码与 Server 契约（`server/agent_server/api/`）逐字段核对。
@@ -116,6 +116,25 @@
 - **消息宽度修复（响应用户反馈"右边没有对好，有一块留白"）**：第十三轮引入的 `assistantBubbleMaxVp = rowContentVp * 0.85` 是鸿蒙侧臆造上限——安卓 AgentMarkdownText 是 `fillMaxWidth` 无分数上限，实测助手内容右缘被钳在 935px（列表内容右缘 1210px），右侧留出 ~275px 空白块。修复：宽度基准改为 `listContentVp = winVp - 40`（仅列表 20vp×2 padding，对齐安卓 LazyColumn horizontal=20dp），助手气泡上限 = 全列表内容宽（安卓 fillMaxWidth 语义），用户气泡 = 78%×listContentVp（安卓 BoxWithConstraints maxWidth×0.78f 语义）；消息行移除额外 left 12/right 32 行内边距（安卓行无额外水平 padding）。实测：助手内容 [84..1194]（原 [126..935]）、用户气泡右缘 1210px = 列表内容右缘（原 1168），与安卓一致
 - 模拟器实测（官方云账号，历史 DSH 会话，设备离线）：组摘要行（"推理了 2 次, 执行了 3 次工具"）✓、无 type 徽章 ✓、组点击原地展开成员弱行 ✓、工具行点击标题文字原地展开 TimelineToolPanel（命令/输出面板 + 复制钮 + "已复制" toast）✓、reasoning 行展开全文 ✓、附件面板浮层（多模态确认：白色圆角卡片 + 轻微阴影覆盖内容之上）✓
 - 未实测（需活跃运行/待审批数据，当前设备离线）：running spinner、"正在运行…"行、审批 notice 钉 composer、建议浮层（takeover 确认框拦截输入未触发）、红色圆角方块停止按钮（需 canInterrupt）；以上均为代码完成 + 构建验证状态
+
+2026-10-21 第二十二轮（上游 50 轮版本对比后选择性移植：工具链 / 即时重连 / 草稿持久化）：
+- **背景**：与 `Agents-Anywhere-main`（上游另一条 50 轮演化的鸿蒙实现，工程位于 harmony/ 根，API 12+ 兼容）逐项对比。经代码级核实，我方功能完整度不落下风（WebSocket 实时通道、ScanKit 扫码登录、原生终端渲染、深色跟随系统等此前误判为缺失的能力均已在库），仅四项值得吸收：质量门禁工具链、网络恢复即时重连、composer 草稿持久化、实测坑位方法论。深色模式跟随系统经核实已实现（AppearanceSettings + APP_MODE_KEY 三态 + onConfigurationUpdate），未重复开发
+- **1. 质量门禁工具链**（`tools/`，自上游移植并适配）：`verify-resource-usage.mjs`（全部 `$r('app.*')` 引用对 base/en/zh_CN 三表校验，比上游多校验 en 表以匹配本工程三语同步约定；实测抓出 LanguageSettings 注释中示例引用误报 1 处后改注释措辞）；`verify-encoding.mjs`（BOM/替换符/mojibake 扫描，exitCode 化）；`verify-reachability.mjs`（升级版：sourceMaps 编译集 + 相对 import 图 BFS 双信号，纯类型模块不再误报；实测抓出真孤儿 `components/RuntimeConfigureSheetOverlay.ets`（仅自引用，初始导入遗留）已删除，注释示例 `$r('app.string.xxx')` 同步修复）；`device-smoke.ps1`（hdc 冒烟助手：Get-Ui/Find-Ui/Click-Row/Shot，适配本机模拟器与 hdc 路径）。三门禁当前全绿：81 ETS / 542 资源引用 / 97 文本文件
+- **2. 网络恢复即时重连**（`common/NetworkMonitor.ets`）：NetConnection `netAvailable` 事件监听（module.json5 新增 `ohos.permission.GET_NETWORK_INFO`），接入三个实时页面——SessionDetailPage（取消退避计时器 + realtimeRetries 归零 + 立即 connectRealtime）、HomePage（dashboard 同策略）、TerminalPage（exited/connected 守卫 + connectStream）；各页面 aboutToDisappear 停止监听防泄漏
+- **3. Composer 草稿持久化**（`feature/ComposerDraftStore.ets`，对齐安卓 SessionComposerDraftStore 语义）：preferences 落盘，按 sessionId 存 JSON（text + 已上传 attachments，复用 parseRemoteUploadedAttachment 校验解码）；onChange/附件增删/发送失败恢复时保存，发送或命令执行成功后清除，onReady 进入会话时恢复——杀进程或离开会话不丢未发送内容
+- **4. 坑位方法论留档**（上游 handoff-48/49/50 提炼，见下节"实测坑位方法论"）
+- 未移植（有意）：API 12+ 兼容降级（需逐 API 审计，工作量大，单独立项）、上游 xterm.js 终端方案（我方原生渲染更轻）、上游 764 keys 文案表（范围不同）、OAuth deep link（已有扫码轮询）
+
+### 实测坑位方法论（源自上游 handoff-48/49/50，与本轮实测经验合并）
+
+1. **`uitest dumpLayout` 不可靠地包含 bindMenu/Sheet 弹出的浮层内容**（浮层在独立窗口）——dump 里找不到菜单项 ≠ 菜单没开，浮层判断要看截图
+2. **息屏 = 应用冻结 = 伪影**：测"随时间发生的事"（重连、轮询）前先 `power-shell timeout -o 1800000` 顶掉息屏超时 + `power-shell wakeup`，否则 26 秒后应用冻结、日志消失，会被误判为疯狂重连；收尾用 `timeout -r` 还原
+3. **不要用 `uitest uiInput keyEvent Back`**：根页面上返回交给平台会直接退出应用
+4. **dumpLayout 中文乱码**：用 Latin 锚点找节点（`Agents-Anywhere`、`jerry`、`DESKTOP-xxx`）
+5. **不要用估算坐标**：布局随数据到达整页重排，坐标必须来自最新 dump 的节点 bounds 中点；抽屉打开时内容卡片右移，dump 坐标带偏移，先确认抽屉状态
+6. **看颜色要取像素，别靠眼睛**：JPEG 预览会骗人（#FDFCFB vs #FFFFFF 只差 2~4 级），用 System.Drawing.GetPixel 取值比对
+7. **`hilog -x` 不能与 `-z` 等选项组合**（CODE: -31）；本工程 JS hilog 不进 `-x` 捕获缓冲时，优先"界面 debug Text + dumpLayout origBounds"测量法
+8. **测试产物不要放 %TEMP% 裸目录**（Windows 临时清理会连工具带产物一起删），放 worktree 或结构化临时目录
 
 ---
 

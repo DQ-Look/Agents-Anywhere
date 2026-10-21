@@ -51,6 +51,7 @@ import {
   PROJECT_STATUS_FILTER_ALL
 } from '../auth/HomeProjectPreferenceStore';
 import { ApiException, errorMessageFrom } from '../common/ApiException';
+import { NetworkMonitor } from '../common/NetworkMonitor';
 import {
   initialRemoteFilePath,
   isHiddenFileEntryName,
@@ -477,9 +478,15 @@ export struct HomePage {
   private newSessionBrowserRoot: string = '~';
   private newSessionBrowserEntries: RemoteDirectoryEntry[] = [];
   private socket: RealtimeWebSocket = new RealtimeWebSocket();
+  private networkMonitor: NetworkMonitor = new NetworkMonitor();
 
   aboutToAppear(): void {
     this.pageActive = true;
+    this.networkMonitor.start({
+      onNetworkAvailable: (): void => {
+        this.onNetworkRestored();
+      }
+    });
     this.projectPreferenceStore.init(getContext(this));
     this.projectPreferenceStore.waitUntilReady().then((): void => {
       if (!this.pageActive) {
@@ -497,6 +504,7 @@ export struct HomePage {
 
   aboutToDisappear(): void {
     this.pageActive = false;
+    this.networkMonitor.stop();
     if (this.retryTimer >= 0) {
       clearTimeout(this.retryTimer);
       this.retryTimer = -1;
@@ -709,6 +717,20 @@ export struct HomePage {
       this.retryTimer = -1;
       this.connectDashboard();
     }, dashboardRetryDelayMs(attempt));
+  }
+
+  /**
+   * Connectivity just returned: if the dashboard socket is down and a backoff
+   * retry is pending, cancel it and reconnect immediately.
+   */
+  private onNetworkRestored(): void {
+    if (!this.pageActive || this.retryTimer < 0) {
+      return;
+    }
+    clearTimeout(this.retryTimer);
+    this.retryTimer = -1;
+    this.dashboardRetries = 0;
+    this.connectDashboard();
   }
 
   private openDevices(): void {

@@ -21,6 +21,7 @@ import { AnnouncementReadStore } from '../auth/AnnouncementReadStore';
 import { AppUpdateIgnoreStore } from '../auth/AppUpdateIgnoreStore';
 import { NewSessionPreferenceStore } from '../auth/NewSessionPreferenceStore';
 import { SidebarViewModeStore } from '../auth/SidebarViewModeStore';
+import { ComposerDraftStore } from '../feature/ComposerDraftStore';
 import { APP_IS_DARK_KEY, APP_MODE_KEY } from '../designsystem/ColorTokens';
 import { AppearanceSettings } from '../designsystem/AppearanceSettings';
 import { LanguageSettings } from '../i18n/LanguageSettings';
@@ -89,6 +90,7 @@ export default class EntryAbility extends UIAbility {
     AppUpdateIgnoreStore.getInstance().init(this.context);
     NewSessionPreferenceStore.getInstance().init(this.context);
     SidebarViewModeStore.getInstance().init(this.context);
+    ComposerDraftStore.getInstance().init(this.context);
     SidebarViewModeStore.getInstance().loadAndApply();
     // Ensure the resolved theme flag matches the system when following it.
     this.syncTheme();

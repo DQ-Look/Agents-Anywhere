@@ -20,6 +20,8 @@ import { SessionsApi } from '../api/SessionsApi';
 import { AuthSessionStore } from '../auth/AuthSessionStore';
 import { errorMessageFrom } from '../common/ApiException';
 import { MdBlock, parseMarkdownBlocks } from '../common/Markdown';
+import { NetworkMonitor } from '../common/NetworkMonitor';
+import { ComposerDraftStore } from '../feature/ComposerDraftStore';
 import {
   OPTIMISTIC_PREFIX, OptimisticMessageStore
 } from '../common/OptimisticMessageStore';
@@ -279,6 +281,8 @@ export struct SessionDetailPage {
   private navPathStack: NavPathStack = new NavPathStack();
   private scroller: Scroller = new Scroller();
   private socket: RealtimeWebSocket = new RealtimeWebSocket();
+  private networkMonitor: NetworkMonitor = new NetworkMonitor();
+  private draftStore: ComposerDraftStore = ComposerDraftStore.getInstance();
   private authStore: AuthSessionStore = AuthSessionStore.getInstance();
   private client: ApiClient = SharedApiClient.getInstance();
   private sessionsApi: SessionsApi = new SessionsApi(this.client);
@@ -340,10 +344,18 @@ export struct SessionDetailPage {
     this.userContentMaxVp = this.userBubbleMaxVp - 34;
     this.assistantBubbleMaxVp = Math.floor(listContentVp);
     this.assistantContentMaxVp = this.assistantBubbleMaxVp - 8;
+    // Reconnect the realtime socket the moment connectivity returns instead of
+    // waiting out the current exponential-backoff delay.
+    this.networkMonitor.start({
+      onNetworkAvailable: (): void => {
+        this.onNetworkRestored();
+      }
+    });
   }
 
   aboutToDisappear(): void {
     this.pageActive = false;
+    this.networkMonitor.stop();
     if (this.retryTimer >= 0) {
       clearTimeout(this.retryTimer);
       this.retryTimer = -1;
@@ -1130,6 +1142,7 @@ export struct SessionDetailPage {
         this.sessionId, command.id, args, intent.raw);
       this.composerInput = '';
       this.commandSuggestions = [];
+      this.draftStore.clear(this.sessionId);
       this.showCommandResult(command, result);
       await this.loadRuntimeState();
     } catch (error) {
@@ -1196,9 +1209,11 @@ export struct SessionDetailPage {
         throw new Error(rpc.errorMessage === null ? 'Could not send the message.' : rpc.errorMessage);
       }
       this.errorMessage = '';
+      this.draftStore.clear(this.sessionId);
     } catch (error) {
       this.composerInput = content;
       this.restorePendingAttachments(optimisticAttachments);
+      this.saveComposerDraft();
       this.removeOptimisticMessage(clientMessageId);
       this.errorMessage = errorMessageFrom(error as Object);
     }
@@ -1224,6 +1239,7 @@ export struct SessionDetailPage {
       const updated = this.pendingAttachments.slice(0);
       updated.push(response.attachments[0]);
       this.pendingAttachments = updated;
+      this.saveComposerDraft();
       this.attachmentUrlInput = '';
       this.errorMessage = '';
     } catch (error) {
@@ -1240,6 +1256,7 @@ export struct SessionDetailPage {
       }
     }
     this.pendingAttachments = remaining;
+    this.saveComposerDraft();
   }
 
   private mimeTypeFromName(name: string): string {
@@ -1326,6 +1343,7 @@ export struct SessionDetailPage {
         updated.push(attachment);
       }
       this.pendingAttachments = updated;
+      this.saveComposerDraft();
       this.attachmentPanelOpen = false;
       this.errorMessage = '';
     } catch (error) {
@@ -1698,6 +1716,33 @@ export struct SessionDetailPage {
       this.retryTimer = -1;
       this.connectRealtime();
     }, reconnectDelayMs(attempt));
+  }
+
+  /**
+   * Connectivity just returned: if the socket is down and a backoff retry is
+   * pending, cancel it and reconnect immediately.
+   */
+  private onNetworkRestored(): void {
+    if (!this.pageActive || this.realtimeConnected || this.retryTimer < 0) {
+      return;
+    }
+    clearTimeout(this.retryTimer);
+    this.retryTimer = -1;
+    this.realtimeRetries = 0;
+    this.connectRealtime();
+  }
+
+  private saveComposerDraft(): void {
+    this.draftStore.save(this.sessionId, this.composerInput, this.pendingAttachments);
+  }
+
+  private async restoreComposerDraft(): Promise<void> {
+    const draft = await this.draftStore.load(this.sessionId);
+    if (!this.pageActive) {
+      return;
+    }
+    this.composerInput = draft.text;
+    this.pendingAttachments = draft.attachments;
   }
 
   private statusColor(): string {
@@ -2747,6 +2792,7 @@ export struct SessionDetailPage {
             .enabled(this.sendInputAllowed())
             .onChange((value: string) => {
               this.composerInput = value;
+              this.saveComposerDraft();
               this.updateCommandSuggestions();
             })
           Row() {
@@ -2899,6 +2945,7 @@ export struct SessionDetailPage {
       if (this.sessionId.length > 0) {
         this.pageActive = true;
         this.restoreOptimisticMessages();
+        this.restoreComposerDraft();
         this.loadSnapshot();
         this.loadRuntimeState();
         this.loadRuntimeCommands();
