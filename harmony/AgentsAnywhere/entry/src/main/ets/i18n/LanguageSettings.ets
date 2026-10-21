@@ -103,7 +103,7 @@ export class LanguageSettings {
 
   /**
    * Push the choice to the HarmonyOS i18n subsystem so that qualifier-based
-   * resources ($r('app.string.xxx')) resolve to the right language bundle.
+   * string resources resolve to the right language bundle.
    * Passing 'default' clears the override and lets the system language win.
    */
   private applyToSystem(mode: AppLanguageMode): void {
