@@ -1,4 +1,4 @@
-# 鸿蒙 vs 安卓 功能对齐状态（2026-10-21 第二十二轮更新）
+# 鸿蒙 vs 安卓 功能对齐状态（2026-10-21 第二十三轮更新）
 
 调查对象：`android/`（Kotlin 参考端）与 `harmony/AgentsAnywhere`（ArkTS，API 26）。
 本文档为**当前状态快照**：此前多轮差距清单中的项目已按批次实现并逐批通过 `devecocli build` 验证。每批实现均以安卓源码与 Server 契约（`server/agent_server/api/`）逐字段核对。
@@ -124,6 +124,15 @@
 - **3. Composer 草稿持久化**（`feature/ComposerDraftStore.ets`，对齐安卓 SessionComposerDraftStore 语义）：preferences 落盘，按 sessionId 存 JSON（text + 已上传 attachments，复用 parseRemoteUploadedAttachment 校验解码）；onChange/附件增删/发送失败恢复时保存，发送或命令执行成功后清除，onReady 进入会话时恢复——杀进程或离开会话不丢未发送内容
 - **4. 坑位方法论留档**（上游 handoff-48/49/50 提炼，见下节"实测坑位方法论"）
 - 未移植（有意）：API 12+ 兼容降级（需逐 API 审计，工作量大，单独立项）、上游 xterm.js 终端方案（我方原生渲染更轻）、上游 764 keys 文案表（范围不同）、OAuth deep link（已有扫码轮询）
+
+2026-10-21 第二十三轮（老版本适配 review + 修复：motion 静态导入崩溃 / DETECT_GESTURE 安装风险）：
+- **背景**：用户自行完成 API 12+ 适配（compatibleSdkVersion 26.0.0 → 5.0.0(12)，PATCH 降级 POST + `X-HTTP-Method-Override`（Server 中间件 `http_method_override.py` 配套），AGENTS/HANDOFF 文档同步），本轮对改动做代码 review + 独立复核
+- **复核通过**：clean 全量构建（33 任务 59s）SUCCESSFUL；ApiClient.patchJson 运行时探测实现正确（无 as、union 类型 + undefined 判断，降级才发 override 头）；独立解析全部 @since>12 编译告警与审计结论一致——`fill`/`stroke` 确为 `Circle().fill(ResourceColor)` 类旧重载误报（API 7 即有）、PATCH 已处理；Server 中间件 ASGI 模式正确（仅 POST 可改写、白名单 PATCH/PUT/DELETE），本机 uv git 依赖网络失败 pytest 未跑仅代码走查；其余声明权限（INTERNET/GET_NETWORK_INFO/KEEP_BACKGROUND_RUNNING/VIBRATE）均 @since 7-9 安全
+- **审计漏洞 1（已修复）**：`@ohos.multimodalAwareness.motion` 模块整体 **@since 15**，HomePage 静态 `import { motion } from '@kit.MultimodalAwarenessKit'` 在 API 12 上页面模块加载即崩（requireNapi 失败，canIUse 守卫来不及执行）——原审计"canIUse 守卫自动禁用"结论仅对**调用**成立，对 **import 本身**不成立
+- **审计漏洞 2（已修复）**：`ohos.permission.DETECT_GESTURE` **@since 20**（permissions.d.ts 证实），API 12 设备不认识该权限，安装高概率报 "install failed due to grant request permissions failed"；权限声明无法按设备条件声明，单 HAP 无解。上游 API 12+ 版本无此权限/功能，无"可装"先例
+- **修复方案（用户选定共存方案）**：HomePage 智感握姿改订阅 `operatingHandChanged`（@since 15，语义"操作手"，对 FAB 靠近拇指更贴切），权限换 `ohos.permission.ACTIVITY_MOTION`（**@since 7**，API 12 完全认识；user_grant → aboutToAppear 内 `abilityAccessCtrl.requestPermissionsFromUser` 运行时弹窗，拒绝/不支持则 FAB 保持右侧静默降级），motion 改 canIUse 守卫内**动态 `await import('@kit.MultimodalAwarenessKit')`**（API 12 永不加载该模块）；`gesture_detection_reason` key 三语表更名 `operating_hand_reason`。附带收益：功能覆盖从 API 20+ 扩到 15+
+- **验证**：arkts_check HomePage 0 错；devecocli build SUCCESSFUL（HomePage 全部 motion @since 15/20 告警消失，动态 import 编译器接受）；三门禁全绿（81 ETS / 542 引用 / 97 文件）。**未实测**：模拟器离线，ACTIVITY_MOTION 弹窗与 FAB 跟手行为待设备在线冒烟；API 12 真机未验证（无设备）
+- **模拟器在线后实测追记**（Mate 80 127.0.0.1:5555，API 26）：① ACTIVITY_MOTION 弹窗正常弹出并授权（ATM 日志 result: [0]）✓；② **抓到运行时 bug：`await import('@kit.MultimodalAwarenessKit')` 编译通过但运行时解析为空模块**（kit 是编译期 shim 无运行时实体），`kit.motion` 为 undefined → 改 `await import('@ohos.multimodalAwareness.motion')` + `.default` 链式访问（命名空间赋中间变量会触发 arkts-no-ns-as-obj 编译错，须直接链式）；③ 修复后模拟器上 `motion.on('operatingHandChanged')` 返回 801（"The device does not support this API"，模拟器无多模态感知服务）→ catch 接住、FAB 保持右侧，**降级路径实测符合设计**；④ 复盘 6 小时前用户手测留下的 jscrash 发现**另一个真 bug**：模拟器无摄像头时 `cameraPicker.pick` 返回 undefined（syscap stub）而非 Promise，`.then` 崩页——已加 `Promise | undefined` 守卫（同 PATCH 模式），无新增 jscrash；⑤ FAB 跟手 happy path 需真机（有感知服务+摄像头）才能全验
 
 ### 实测坑位方法论（源自上游 handoff-48/49/50，与本轮实测经验合并）
 

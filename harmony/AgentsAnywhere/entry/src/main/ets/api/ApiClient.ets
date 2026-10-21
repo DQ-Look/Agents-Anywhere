@@ -12,6 +12,7 @@ import {
 const CONNECT_TIMEOUT_MS = 10000;
 const READ_TIMEOUT_MS = 15000;
 const JSON_CONTENT_TYPE = 'application/json; charset=utf-8';
+const METHOD_OVERRIDE_HEADER = 'X-HTTP-Method-Override';
 const DOWNLOAD_READ_TIMEOUT_MS = 60000;
 
 export interface UploadFilePart {
@@ -262,8 +263,13 @@ export class ApiClient {
 
   async patchJson(serverUrl: string, path: string, body: Record<string, Object>,
     authorizationToken: string | null = null): Promise<Record<string, Object>> {
-    return this.requestJson(serverUrl, path, http.RequestMethod.PATCH, JSON.stringify(body),
-      JSON_CONTENT_TYPE, authorizationToken, READ_TIMEOUT_MS);
+    // RequestMethod.PATCH only exists from API 26; on older runtimes the enum
+    // member resolves to undefined and we fall back to POST + method override.
+    const nativePatch: http.RequestMethod | undefined = http.RequestMethod.PATCH;
+    const method = nativePatch === undefined ? http.RequestMethod.POST : nativePatch;
+    const methodOverride = nativePatch === undefined ? 'PATCH' : null;
+    return this.requestJson(serverUrl, path, method, JSON.stringify(body),
+      JSON_CONTENT_TYPE, authorizationToken, READ_TIMEOUT_MS, methodOverride);
   }
 
   async putJson(serverUrl: string, path: string, body: Record<string, Object>,
@@ -280,7 +286,7 @@ export class ApiClient {
 
   private async requestJson(serverUrl: string, path: string, method: http.RequestMethod,
     bodyData: string | Uint8Array | null, contentType: string | null, authorizationToken: string | null,
-    readTimeoutMs: number): Promise<Record<string, Object>> {
+    readTimeoutMs: number, methodOverride: string | null = null): Promise<Record<string, Object>> {
     const origin = normalizeServerOrigin(serverUrl);
     if (origin === null) {
       throw new ApiException('The server URL is invalid.');
@@ -297,7 +303,7 @@ export class ApiClient {
       // candidate keeps its ApiException (status code + detail) intact.
       const allowLegacyFallback = index < candidates.length - 1;
       const result = await this.requestJsonOnce(candidates[index], method, bodyToSend, contentType,
-        authorizationToken, origin, readTimeoutMs, allowLegacyFallback);
+        authorizationToken, origin, readTimeoutMs, allowLegacyFallback, methodOverride);
       if (result !== null) {
         return result;
       }
@@ -368,7 +374,8 @@ export class ApiClient {
 
   private async requestJsonOnce(url: string, method: http.RequestMethod, bodyData: string | Uint8Array,
     contentType: string | null, authorizationToken: string | null, origin: string,
-    readTimeoutMs: number, allowLegacyFallback: boolean): Promise<Record<string, Object> | null> {
+    readTimeoutMs: number, allowLegacyFallback: boolean,
+    methodOverride: string | null = null): Promise<Record<string, Object> | null> {
     const httpRequest = http.createHttp();
     try {
       const headers: Record<string, string> = {
@@ -377,6 +384,9 @@ export class ApiClient {
       };
       if (contentType !== null) {
         headers['Content-Type'] = contentType;
+      }
+      if (methodOverride !== null) {
+        headers[METHOD_OVERRIDE_HEADER] = methodOverride;
       }
       if (authorizationToken !== null && authorizationToken.length > 0) {
         headers['Authorization'] = `Bearer ${authorizationToken}`;

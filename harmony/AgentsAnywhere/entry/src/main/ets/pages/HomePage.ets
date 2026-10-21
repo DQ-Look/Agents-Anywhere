@@ -2,7 +2,7 @@ import { fileIo, picker } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { vibrator } from '@kit.SensorServiceKit';
 import { componentUtils, curves } from '@kit.ArkUI';
-import { motion } from '@kit.MultimodalAwarenessKit';
+import { abilityAccessCtrl } from '@kit.AbilityKit';
 import { Callback } from '@kit.BasicServicesKit';
 import { ApiClient } from '../api/ApiClient';
 import { SessionsApi } from '../api/SessionsApi';
@@ -393,16 +393,20 @@ export struct HomePage {
   @State filterAnchor: HomeMenuAnchor = { x: 0, y: 0, width: 0, height: 0 };
   @State filterAgents: string[] = [];
   @State filterDevices: HomeFilterDeviceOption[] = [];
-  // Smart reach (智感握姿): the home FAB follows the holding hand so it stays
-  // within thumb reach; defaults to the right side when unsupported.
+  // Smart reach (智感握姿): the home FAB follows the operating hand so it stays
+  // within thumb reach; defaults to the right side when unsupported or denied.
   @State fabOnRight: boolean = true;
   @State fabHasAppeared: boolean = false;
-  private holdingHandSubscribed: boolean = false;
-  private holdingHandCallback: Callback<motion.HoldingHandStatus> =
-    (status: motion.HoldingHandStatus): void => {
-      if (status === motion.HoldingHandStatus.LEFT_HAND_HELD) {
+  private operatingHandSubscribed: boolean = false;
+  // OperatingHandStatus enum values, refreshed from the runtime module once
+  // the dynamic import resolves; 1/2 are the API 15+ LEFT/RIGHT members.
+  private operatingHandLeftValue: number = 1;
+  private operatingHandRightValue: number = 2;
+  private operatingHandCallback: Callback<number> =
+    (status: number): void => {
+      if (status === this.operatingHandLeftValue) {
         this.fabOnRight = false;
-      } else if (status === motion.HoldingHandStatus.RIGHT_HAND_HELD) {
+      } else if (status === this.operatingHandRightValue) {
         this.fabOnRight = true;
       }
     };
@@ -499,7 +503,7 @@ export struct HomePage {
     this.loadSessions();
     this.loadAgentGate();
     this.connectDashboard();
-    this.subscribeHoldingHand();
+    this.subscribeOperatingHand();
   }
 
   aboutToDisappear(): void {
@@ -510,31 +514,46 @@ export struct HomePage {
       this.retryTimer = -1;
     }
     this.socket.destroy();
-    this.unsubscribeHoldingHand();
+    this.unsubscribeOperatingHand();
   }
 
-  private subscribeHoldingHand(): void {
-    if (!canIUse('SystemCapability.MultimodalAwareness.Motion')) {
+  // The motion kit module is @since 15, so the import must stay dynamic: a
+  // static import would crash HomePage on API 12 devices before canIUse runs.
+  // Kit paths resolve to an empty module at runtime; import the underlying
+  // @ohos module (which does `export default motion`) instead.
+  private async subscribeOperatingHand(): Promise<void> {
+    if (this.operatingHandSubscribed ||
+      !canIUse('SystemCapability.MultimodalAwareness.Motion')) {
       return;
     }
     try {
-      motion.on('holdingHandChanged', this.holdingHandCallback);
-      this.holdingHandSubscribed = true;
+      const atManager = abilityAccessCtrl.createAtManager();
+      const grant = await atManager.requestPermissionsFromUser(getContext(this),
+        ['ohos.permission.ACTIVITY_MOTION']);
+      if (grant.authResults.length === 0 || grant.authResults[0] !== 0) {
+        return;
+      }
+      const motionModule = await import('@ohos.multimodalAwareness.motion');
+      this.operatingHandLeftValue = motionModule.default.OperatingHandStatus.LEFT_HAND_OPERATED;
+      this.operatingHandRightValue = motionModule.default.OperatingHandStatus.RIGHT_HAND_OPERATED;
+      motionModule.default.on('operatingHandChanged', this.operatingHandCallback);
+      this.operatingHandSubscribed = true;
     } catch (error) {
-      hilog.warn(0x0000, LOG_TAG, `holding hand subscribe failed err=%{public}s`,
+      hilog.warn(0x0000, LOG_TAG, `operating hand subscribe failed err=%{public}s`,
         errorMessageFrom(error));
     }
   }
 
-  private unsubscribeHoldingHand(): void {
-    if (!this.holdingHandSubscribed) {
+  private async unsubscribeOperatingHand(): Promise<void> {
+    if (!this.operatingHandSubscribed) {
       return;
     }
-    this.holdingHandSubscribed = false;
+    this.operatingHandSubscribed = false;
     try {
-      motion.off('holdingHandChanged', this.holdingHandCallback);
+      const motionModule = await import('@ohos.multimodalAwareness.motion');
+      motionModule.default.off('operatingHandChanged', this.operatingHandCallback);
     } catch (error) {
-      hilog.warn(0x0000, LOG_TAG, `holding hand unsubscribe failed err=%{public}s`,
+      hilog.warn(0x0000, LOG_TAG, `operating hand unsubscribe failed err=%{public}s`,
         errorMessageFrom(error));
     }
   }

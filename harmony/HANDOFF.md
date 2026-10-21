@@ -1,15 +1,18 @@
 # HarmonyOS 端开发 Handoff（DevECode 接续说明）
 
 仓库：当前仓库，分支 feat/hmo/client-explore。
-鸿蒙工程：harmony/AgentsAnywhere（bundle com.agentsanywhere.app，API 26）。
+鸿蒙工程：harmony/AgentsAnywhere（bundle com.agentsanywhere.app，**兼容 API 12+（compatibleSdkVersion 5.0.0(12)），target API 26**）。
 参考实现：android/app/src/main/java/com/agentsanywhere/app（Kotlin，分层规则见 android/ARCHITECTURE.md）。
 契约：contracts/ 与 docs/api/。Server 当前 2.1.0。
 
-## 构建（重要：devecocli 已卸载）
-- 当前仓库里 **devecocli 已被卸载**，不能再用于构建。改用 hvigorw：
-  hvigorw.bat --mode module -p product=default -p module=entry@default assembleHap
+## 构建（devecocli 可用）
+- **devecocli 1.3.4 可用**（`devecocli build` / `devecocli build clean`），正常构建直接用它；以下 hvigorw 为备选路径：
+  & "D:\ProgramFiles\DevEco Studio\tools\hvigor\bin\hvigorw.bat" --mode module -p product=default -p module=entry@default assembleHap
   （Node 使用 DevEco Studio 自带的 Node，无需 devecocli。）
-- 最近一次 hvigorw 构建：**BUILD SUCCESSFUL（EXIT=0，无 ERROR，仅 WARN：deprecated API / crypto may-throw / system-capacity，均不阻断**）。
+- **必须先设环境**（hvigor daemon 会继承，改环境后要 --stop-daemon）：
+  $env:DEVECO_SDK_HOME = "D:\ProgramFiles\DevEco Studio\sdk"
+  $env:Path = "D:\ProgramFiles\DevEco Studio\jbr\bin;$env:Path"  # PackageHap 需要 java，否则 spawn java ENOENT
+- 最近一次构建：**BUILD SUCCESSFUL（compatibleSdkVersion 5.0.0(12) 下通过，devecocli clean 全量 59s）**，仅 WARN（deprecated API / crypto may-throw / system-capacity / PATCH @since 26 降级提示，均不阻断）。
 
 ## 已完成
 - 脚手架 + build（hvigorw build 通过）
@@ -41,6 +44,25 @@
 7. 未在真机/模拟器做过 UI 验证（仅 headless build）；深色模式重渲染未订阅 APP_IS_DARK_KEY（全端既有缺口）
 8. 客户端自动更新：downloadUpdate 目前用 context.openLink(downloadUrl) 兜底，未做真实下载/安装
 
+## 本次适配（API 12+）
+- **compatibleSdkVersion 26.0.0 → 5.0.0(12)**（targetSdkVersion 保持 26.0.0）。
+- **审计方法**：Node 脚本解析 SDK d.ts 的 `@since` 标注（扫描导入成员/链式属性/组件/控制器方法），辅助 devecocli check compat（13→24，307 条记录）交叉验证。
+- **审计结论**：真正 API 12 不可用项只有 2 个，均已处理：
+  1. `http.RequestMethod.PATCH`（@since 26）→ patchJson 降级 POST + `X-HTTP-Method-Override: PATCH`，Server 端 `agent_server/infra/http_method_override.py` 中间件重写（已 standalone 验证通过；server 全量 pytest 因本机无 Docker/PostgreSQL、uv git 依赖拉取失败未跑）。
+  2. `motion.*`（模块整体 @since 15；HoldingHandStatus/holdingHandChanged/DETECT_GESTURE 均 @since 20）→ **原审计"canIUse 守卫即可"结论有误**：静态 `import { motion } from '@kit.MultimodalAwarenessKit'` 在 API 12 上页面模块加载即崩（requireNapi 失败，canIUse 来不及执行），且 `ohos.permission.DETECT_GESTURE`（@since 20）声明会导致 API 12 安装失败（"install failed due to grant request permissions failed"，权限无法按设备条件声明）。**已修复**：HomePage 改订阅 `operatingHandChanged`（@since 15，语义为操作手，对"FAB 靠近拇指"更贴切），权限换成 `ohos.permission.ACTIVITY_MOTION`（**@since 7**，API 12 完全认识，user_grant 需运行时弹窗授权，拒绝则 FAB 保持右侧静默降级），motion 模块改为 canIUse 守卫内**动态 import**（API 12 上永不加载该模块，零崩溃零安装风险）。附带收益：功能可用范围从 API 20+ 扩大到 API 15+。
+- **确认安全（≤12）**：SymbolGlyph(11)、openLink(12)、Font.registerFont(10)、cameraPicker(11)、ScanKit(9-11)、webview(9-10)、UIContext(10-12)、cryptoFramework、vibrator、backgroundTaskManager、wantAgent、fileIo、preferences 等全部 ≤ API 12；编译期 `fill`/`PATCH`/`motion` 的 @since 26/15/20 告警均为「新重载/新枚举成员」误报（旧重载 ≤ 12 仍可用）。
+- **AGENTS.md / 本文档**同步更新最低版本说明。
+
+## 本次品牌化 + 语言切换优化
+- **品牌图标**（与 Android 端一致，取材 android/app/src/main/res）：
+  - 分层图标 background.png（1024x1024 纯白，对应 Android `@android:color/white`）+ foreground.png（直接拷贝 `drawable-nodpi/ic_launcher_foreground.png`，1024x1024 透明底黑色 AA 标志，自带安全区留白），AppScope 与 entry 各一套。
+  - startIcon.png（144x144）：白色圆角底（rx 匹配品牌 37/180）+ 前景缩放合成，亮/暗启动页背景（白/黑）下均可见。
+  - 生成脚本：C:\Users\Qiao\AppData\Local\Temp\deveco\gen-icons-from-android.ps1（临时，勿提交）。早期用 web icon.svg 渲染的黑底白标版本已被否决（与 Android 端不一致）。
+- **切换语言卡顿修复**（LanguageSettings.ets）：
+  - 根因：setLanguage 同步调 `i18n.System.setAppPreferredLanguage` → 整棵可见页面树同帧重建；且语言变更触发 EntryAbility.onConfigurationUpdate → loadAndApply → 再次 setAppPreferredLanguage，造成重复配置变更/重渲染。
+  - 修复：① `lastAppliedLocale` 守卫，已应用过的 locale 直接跳过，阻断回环；② 交互路径 `setLanguage` 只延迟 300ms 应用系统语言（persist + AppStorage 选中态仍即时更新，勾选行当帧响应）。
+  - 未在真机实测帧率，构建已通过。
+
 ## 本次补齐（P2）
 - **暗色模式重渲染**：getColors() 原本以非响应式方式读 AppStorage，没有任何 @Component 订阅 APP_IS_DARK_KEY，导致系统/手动切换主题时页面不重绘。已在 14 个文件、17 个 struct 上加 @StorageProp(APP_IS_DARK_KEY) themeIsDark: boolean = false;（ConfirmDialog 是 @CustomDialog，不支持该装饰器，已跳过——dialog 在 open() 时重建，仍通过 getColors() 生效）。EntryAbility 的 onConfigurationUpdate→syncTheme 已正确维护该 key。
 - **更新弹窗令牌化**：AppUpdatePromptOverlay.ets 原先硬编码 #111827 / #2563EB 等十六进制与 Color.White，违反 ColorTokens 规则；已改写为使用 getColors() 令牌（headingText / muted / inkSoft / secondaryActionSurface / onPrimaryAction / primaryAction / dialogSurface）。downloadUrl 字段保留以兼容调用点。
@@ -55,6 +77,9 @@
 - 接口若要用对象字面量实现（如 Listener），成员必须写成**函数类型属性**（onOpen: () => void），方法签名（onOpen(): void）会触发 arkts-no-untyped-obj-literals
 - webSocket.WebSocket（API 26）没有 destroy()，用 off() + close() 释放
 - ctx.pathInfo.param 是 unknown，需 s string 收敛后再 typeof 校验
-- API 26 才支持 PATCH，工程已 target 26
+- RequestMethod.PATCH 从 API 26 才有：ApiClient.patchJson 运行时检测 `http.RequestMethod.PATCH`（API 12 上为 undefined），不支持时降级为 POST + `X-HTTP-Method-Override: PATCH`（Server app.py 已加对应中间件）
+- **@kit 模块整体 @since > compatibleSdkVersion 时，静态 import 会在低版本设备页面加载即崩**（canIUse 守卫救不了 import 本身）；必须改成 canIUse 守卫内**动态 import**。同理 requestPermissions 里声明高版本才有的权限会导致低版本安装失败，且无法按设备条件声明——只能换成低版本就存在的等价权限
+- **动态 import 必须用 `@ohos.*` 底层路径，不能用 `@kit.*` 路径**（实测）：kit 是编译期 shim 无运行时实体，`await import('@kit.MultimodalAwarenessKit')` 编译通过但运行时解析为**空模块**，`kit.motion` 为 undefined；正确写法 `await import('@ohos.multimodalAwareness.motion')` 后经 `.default` 访问命名空间成员。且命名空间**不能赋给中间变量**（arkts-no-ns-as-obj 报错），须 `motionModule.default.on(...)` 链式访问
+- **无摄像头设备（模拟器）上 `cameraPicker.pick` 返回 undefined 而非 Promise**（syscap stub），直接 `.then` 会崩页（实测 jscrash "Cannot read property then of undefined"）；须 `const picked: Promise<PickerResult> | undefined = cameraPicker.pick(...)` + undefined 守卫，同 PATCH 处理模式
 - 不引入新 npm 依赖；如需先报告
 - 每个模块写完先 arkts_check 再 build，失败立即修
