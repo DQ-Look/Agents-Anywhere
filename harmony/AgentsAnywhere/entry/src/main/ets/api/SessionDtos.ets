@@ -124,6 +124,14 @@ export interface RemoteTimelineItem {
   role: string | null;
   text: string;
   kind: string | null;
+  command: string | null;
+  output: string | null;
+  toolName: string | null;
+  targetPath: string | null;
+  query: string | null;
+  description: string | null;
+  action: string | null;
+  changes: RemoteTimelineFileChange[];
   clientMessageId: string | null;
   orderSeq: number;
   revision: number;
@@ -131,6 +139,12 @@ export interface RemoteTimelineItem {
   createdAt: string;
   contentHash: string;
   attachments: RemoteTimelineAttachment[];
+}
+
+export interface RemoteTimelineFileChange {
+  path: string;
+  action: string;
+  diff: string | null;
 }
 
 export interface RemoteTimelineAttachment {
@@ -343,6 +357,8 @@ export function parseRemoteTimelineItem(value: Record<string, Object>): RemoteTi
   const contentRecord: Record<string, Object> = content === null ? {} : content;
   const source = objGetRecord(value, 'source');
   const sourceRecord: Record<string, Object> = source === null ? {} : source;
+  const input = objGetRecord(contentRecord, 'input');
+  const inputRecord: Record<string, Object> = input === null ? {} : input;
   return {
     id: objGetString(value, 'id', ''),
     sessionId: objGetString(value, 'sessionId', ''),
@@ -352,6 +368,19 @@ export function parseRemoteTimelineItem(value: Record<string, Object>): RemoteTi
     text: objGetOptString(contentRecord, 'text') ?? objGetOptString(contentRecord, 'message') ??
       objGetOptString(contentRecord, 'description') ?? '',
     kind: objGetOptString(contentRecord, 'kind'),
+    command: timelineCommandOf(contentRecord, inputRecord),
+    output: objGetOptString(contentRecord, 'output') ?? objGetOptString(contentRecord, 'outputPreview') ??
+      objGetOptString(contentRecord, 'outputText') ?? objGetOptString(contentRecord, 'error'),
+    toolName: objGetOptString(contentRecord, 'toolName') ?? objGetOptString(contentRecord, 'name') ??
+      objGetOptString(contentRecord, 'tool') ?? objGetOptString(contentRecord, 'title'),
+    targetPath: objGetOptString(contentRecord, 'path') ?? objGetOptString(contentRecord, 'filePath') ??
+      objGetOptString(contentRecord, 'file') ?? objGetOptString(contentRecord, 'uri') ??
+      objGetOptString(inputRecord, 'file_path') ?? objGetOptString(inputRecord, 'notebook_path') ??
+      objGetOptString(inputRecord, 'path'),
+    query: objGetOptString(contentRecord, 'query') ?? objGetOptString(inputRecord, 'query'),
+    description: objGetOptString(contentRecord, 'description') ?? objGetOptString(contentRecord, 'title'),
+    action: objGetOptString(contentRecord, 'action'),
+    changes: parseTimelineFileChanges(contentRecord),
     clientMessageId: objGetOptString(sourceRecord, 'clientMessageId'),
     orderSeq: objGetNumber(value, 'orderSeq', 0),
     revision: objGetNumber(value, 'revision', 1),
@@ -360,6 +389,52 @@ export function parseRemoteTimelineItem(value: Record<string, Object>): RemoteTi
     contentHash: objGetString(value, 'contentHash', ''),
     attachments: collectTimelineAttachments(contentRecord)
   };
+}
+
+function timelineCommandOf(content: Record<string, Object>, input: Record<string, Object>): string | null {
+  const direct = timelineCommandTextOf(content, 'command');
+  if (direct !== null) {
+    return direct;
+  }
+  const fromInput = timelineCommandTextOf(input, 'command');
+  if (fromInput !== null) {
+    return fromInput;
+  }
+  return timelineCommandTextOf(input, 'cmd');
+}
+
+function timelineCommandTextOf(record: Record<string, Object>, key: string): string | null {
+  const value = record[key];
+  if (typeof value === 'string' && value.length > 0) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const parts: string[] = [];
+    for (const part of value as Object[]) {
+      parts.push(`${part}`);
+    }
+    const joined = parts.join(' ').trim();
+    return joined.length > 0 ? joined : null;
+  }
+  return null;
+}
+
+function parseTimelineFileChanges(content: Record<string, Object>): RemoteTimelineFileChange[] {
+  const changes: RemoteTimelineFileChange[] = [];
+  for (const changeValue of recordsFromArray(objGetArray(content, 'changes'))) {
+    const path = objGetOptString(changeValue, 'path') ?? objGetOptString(changeValue, 'filePath') ??
+      objGetOptString(changeValue, 'file') ?? objGetOptString(changeValue, 'uri');
+    if (path === null) {
+      continue;
+    }
+    const change: RemoteTimelineFileChange = {
+      path: path,
+      action: objGetString(changeValue, 'action', ''),
+      diff: objGetOptString(changeValue, 'diff')
+    };
+    changes.push(change);
+  }
+  return changes;
 }
 
 export function parseRemoteTimelineAttachment(value: Record<string, Object>): RemoteTimelineAttachment | null {

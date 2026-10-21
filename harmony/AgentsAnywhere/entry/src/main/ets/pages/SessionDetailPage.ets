@@ -20,17 +20,30 @@ import { SessionsApi } from '../api/SessionsApi';
 import { AuthSessionStore } from '../auth/AuthSessionStore';
 import { errorMessageFrom } from '../common/ApiException';
 import { MdBlock, parseMarkdownBlocks } from '../common/Markdown';
-import { OPTIMISTIC_PREFIX, OptimisticMessageStore } from '../common/OptimisticMessageStore';
+import {
+  OPTIMISTIC_PREFIX, OptimisticMessageStore
+} from '../common/OptimisticMessageStore';
+import {
+  TimelineToolGroupModel,
+  TimelineToolRowModel,
+  TimelineToolStrings,
+  isTimelineToolRunItem,
+  timelineToolGroupModelOf,
+  timelineToolRowModelOf
+} from '../common/TimelineSummaries';
 import { AgentMarkdownView } from '../components/AgentMarkdownView';
 import { AttachmentImageView } from '../components/AttachmentImageView';
 import { AttachmentPreviewOverlay } from '../components/AttachmentPreviewOverlay';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { DiffCodeView } from '../components/DiffCodeView';
+import { TimelineToolEntry } from '../components/session/TimelineToolEntry';
+import { TimelineToolGroupEntry } from '../components/session/TimelineToolGroupEntry';
 import { fileIo } from '@kit.CoreFileKit';
 import { picker } from '@kit.CoreFileKit';
 import { common, OpenLinkOptions } from '@kit.AbilityKit';
 import { camera, cameraPicker } from '@kit.CameraKit';
 import { util } from '@kit.ArkTS';
+import { display } from '@kit.ArkUI';
 import { showToast } from '../utils/Toast';
 import {
   NoticeAnswerDraft,
@@ -51,6 +64,17 @@ interface TimelineEntry {
   item: RemoteTimelineItem;
   blocks: MdBlock[];
   attachments: RemoteTimelineAttachment[];
+}
+
+// One rendered row of the session timeline. Tool-like items are condensed
+// into weak rows ('tool') or collapsed runs of them ('group'); everything
+// else stays a classic entry ('entry').
+interface SessionSection {
+  kind: string;
+  entry: TimelineEntry | null;
+  entryKey: string;
+  toolRow: TimelineToolRowModel | null;
+  group: TimelineToolGroupModel | null;
 }
 
 // Result of applying one realtime event: whether the rendered entry list must
@@ -144,13 +168,24 @@ function shouldReplaceItem(current: RemoteTimelineItem, incoming: RemoteTimeline
 }
 
 function isRenderableItem(item: RemoteTimelineItem): boolean {
-  if (item.type !== 'message') {
-    return item.text.length > 0;
+  if (item.type === 'message') {
+    if (item.text.trim().length > 0) {
+      return true;
+    }
+    return item.attachments.length > 0;
   }
-  if (item.text.trim().length > 0) {
+  // Non-message items render as weak tool rows whenever they carry any
+  // human-visible payload: text, a command, output or file changes.
+  if (item.text.length > 0) {
     return true;
   }
-  return item.attachments.length > 0;
+  if (item.command !== null && item.command.length > 0) {
+    return true;
+  }
+  if (item.output !== null && item.output.length > 0) {
+    return true;
+  }
+  return item.changes.length > 0;
 }
 
 function eventCursorSequenceOrNull(cursor: string): number | null {
@@ -196,11 +231,12 @@ export struct SessionDetailPage {
   @State title: string = 'Session';
   @State runtimeLabel: string = '';
   @State statusLabel: string = 'idle';
-  @State entries: TimelineEntry[] = [];
+  @State sections: SessionSection[] = [];
   @State notices: RemoteRuntimeNotice[] = [];
   @State composerInput: string = '';
   @State commandSuggestions: RemoteRuntimeCommand[] = [];
   @State attachmentPanelOpen: boolean = false;
+  @State attachmentUrlMode: boolean = false;
   @State attachmentUrlInput: string = '';
   @State uploadingAttachment: boolean = false;
   @State pickingLocalFile: boolean = false;
@@ -249,6 +285,15 @@ export struct SessionDetailPage {
   private realtimeApi: RealtimeApi = new RealtimeApi(this.client);
   private optimisticStore: OptimisticMessageStore = OptimisticMessageStore.getInstance();
   private pendingTakeoverValue: boolean = false;
+  private readOnlyComposerTapCount: number = 0;
+  // Absolute width caps (vp) for message bubbles and their content. Percentages
+  // inside constraintSize pollute descendant percentage resolution, so bubble
+  // content is capped with absolute vp values computed from the display width.
+  private windowWidthVp: number = 0;
+  private userBubbleMaxVp: number = 0;
+  private userContentMaxVp: number = 0;
+  private assistantBubbleMaxVp: number = 0;
+  private assistantContentMaxVp: number = 0;
   private confirmTakeoverDialog: CustomDialogController = new CustomDialogController({
     builder: ConfirmDialog({
       title: this.takeoverDialogTitle(),
@@ -267,6 +312,35 @@ export struct SessionDetailPage {
     autoCancel: true,
     alignment: DialogAlignment.Center
   });
+  private confirmDeviceOfflineDialog: CustomDialogController = new CustomDialogController({
+    builder: ConfirmDialog({
+      title: $r('app.string.session_device_offline_title'),
+      message: $r('app.string.session_device_offline_body'),
+      confirmText: $r('app.string.common_ok'),
+      showCancel: false,
+      onConfirm: (): void => {
+        this.confirmDeviceOfflineDialog.close();
+      },
+      onCancel: (): void => {
+        this.confirmDeviceOfflineDialog.close();
+      }
+    }),
+    autoCancel: true,
+    alignment: DialogAlignment.Center
+  });
+
+  aboutToAppear(): void {
+    const displayInfo = display.getDefaultDisplaySync();
+    const density = displayInfo.densityPixels > 0 ? displayInfo.densityPixels : 3.5;
+    this.windowWidthVp = displayInfo.width / density;
+    // List content = window - 40vp side padding. Android caps the user bubble
+    // at 78% of the list content width and lets assistant markdown fill it.
+    const listContentVp = this.windowWidthVp - 40;
+    this.userBubbleMaxVp = Math.floor(listContentVp * 0.78);
+    this.userContentMaxVp = this.userBubbleMaxVp - 34;
+    this.assistantBubbleMaxVp = Math.floor(listContentVp);
+    this.assistantContentMaxVp = this.assistantBubbleMaxVp - 8;
+  }
 
   aboutToDisappear(): void {
     this.pageActive = false;
@@ -295,24 +369,108 @@ export struct SessionDetailPage {
     return `hmos_${Date.now().toString(36)}_${this.optCounter}`;
   }
 
+  private localText(resource: Resource): string {
+    return getContext(this).resourceManager.getStringSync(resource);
+  }
+
+  private sessionCwd(): string {
+    const session = this.session;
+    if (session !== null && session.cwd !== null) {
+      return session.cwd;
+    }
+    return '';
+  }
+
+  private toolStrings(): TimelineToolStrings {
+    const strings: TimelineToolStrings = {
+      ran: this.localText($r('app.string.session_tool_ran')),
+      commandFallback: this.localText($r('app.string.session_tool_command_fallback')),
+      createdFile: this.localText($r('app.string.session_tool_created_file')),
+      changedFile: this.localText($r('app.string.session_tool_changed_file')),
+      createdFiles: this.localText($r('app.string.session_tool_created_files')),
+      changedFiles: this.localText($r('app.string.session_tool_changed_files')),
+      searched: this.localText($r('app.string.session_tool_searched')),
+      webFallback: this.localText($r('app.string.session_tool_web_fallback')),
+      reasoning: this.localText($r('app.string.session_tool_reasoning')),
+      groupReasoning: this.localText($r('app.string.session_tool_group_reasoning')),
+      groupTools: this.localText($r('app.string.session_tool_group_tools')),
+      groupItems: this.localText($r('app.string.session_tool_group_items'))
+    };
+    return strings;
+  }
+
+  private entrySectionOf(item: RemoteTimelineItem): SessionSection {
+    const entry: TimelineEntry = {
+      item: item,
+      blocks: parseMarkdownBlocks(item.text),
+      attachments: item.attachments
+    };
+    const section: SessionSection = {
+      kind: 'entry',
+      entry: entry,
+      entryKey: `${item.id}_${item.revision}_${item.updatedSeq}`,
+      toolRow: null,
+      group: null
+    };
+    return section;
+  }
+
+  // Flushes a run of consecutive tool-like rows: two or more collapse into a
+  // group section, a lone row becomes a single weak tool section.
+  private flushToolRows(sections: SessionSection[], rows: TimelineToolRowModel[],
+    strings: TimelineToolStrings): void {
+    if (rows.length === 0) {
+      return;
+    }
+    if (rows.length >= 2) {
+      const group = timelineToolGroupModelOf(rows, strings);
+      const section: SessionSection = {
+        kind: 'group',
+        entry: null,
+        entryKey: group.groupKey,
+        toolRow: null,
+        group: group
+      };
+      sections.push(section);
+      return;
+    }
+    for (const row of rows) {
+      const section: SessionSection = {
+        kind: 'tool',
+        entry: null,
+        entryKey: row.rowKey,
+        toolRow: row,
+        group: null
+      };
+      sections.push(section);
+    }
+  }
+
   private rebuildEntries(): void {
-    const entries: TimelineEntry[] = [];
+    const sections: SessionSection[] = [];
+    const strings = this.toolStrings();
+    const cwdRaw = this.sessionCwd();
+    const cwd = cwdRaw.length > 0 ? cwdRaw : null;
+    let pendingRows: TimelineToolRowModel[] = [];
     for (const item of this.items) {
       if (!isRenderableItem(item)) {
         continue;
       }
-      const entry: TimelineEntry = {
-        item: item,
-        blocks: parseMarkdownBlocks(item.text),
-        attachments: item.attachments
-      };
-      entries.push(entry);
+      if (isTimelineToolRunItem(item)) {
+        pendingRows.push(timelineToolRowModelOf(item, cwd, strings));
+        continue;
+      }
+      this.flushToolRows(sections, pendingRows, strings);
+      pendingRows = [];
+      sections.push(this.entrySectionOf(item));
     }
-    this.entries = entries;
+    this.flushToolRows(sections, pendingRows, strings);
+    this.sections = sections;
   }
 
   private syncSessionMeta(session: RemoteSession): void {
     this.session = session;
+    this.takeoverOn = session.takeover;
     const title = session.title === null || session.title.length === 0 ? 'Session' : session.title;
     this.title = title;
     this.runtimeLabel = session.runtimeName;
@@ -335,10 +493,17 @@ export struct SessionDetailPage {
     return hasCapability(this.capabilities, capabilityId);
   }
 
+  // Android parity (sessionComposerEnabled): composer input requires the
+  // session to be in takeover mode AND fresh capability facts; a missing
+  // capability entry disables the feature. Other read-only surfaces keep the
+  // null-tolerant behavior of capabilityAllowed() above.
   private sendInputAllowed(): boolean {
-    return this.capabilityAllowed(SESSION_SEND_MESSAGE_CAPABILITY) ||
-      this.capabilityAllowed(SESSION_COMMANDS_CAPABILITY) ||
-      this.capabilityAllowed(SESSION_COMMAND_EXECUTE_CAPABILITY);
+    if (!this.takeoverOn || this.capabilities === null) {
+      return false;
+    }
+    return hasCapability(this.capabilities, SESSION_SEND_MESSAGE_CAPABILITY) ||
+      hasCapability(this.capabilities, SESSION_COMMANDS_CAPABILITY) ||
+      hasCapability(this.capabilities, SESSION_COMMAND_EXECUTE_CAPABILITY);
   }
 
   private commandsAllowed(): boolean {
@@ -465,6 +630,21 @@ export struct SessionDetailPage {
       : $r('app.string.session_disable_takeover_body', agentLabel);
   }
 
+  private handleReadOnlyComposerClick(): void {
+    if (this.sendInputAllowed() || this.takeoverBusy) {
+      return;
+    }
+    this.readOnlyComposerTapCount += 1;
+    if (this.readOnlyComposerTapCount >= 2) {
+      this.readOnlyComposerTapCount = 0;
+      if (this.session === null || this.session.connectorStatus !== 'online') {
+        this.confirmDeviceOfflineDialog.open();
+      } else if (!this.takeoverOn) {
+        this.requestTakeoverChange(true);
+      }
+    }
+  }
+
   private requestTakeoverChange(desired: boolean): void {
     if (this.takeoverBusy) {
       return;
@@ -485,6 +665,7 @@ export struct SessionDetailPage {
         : await this.sessionsApi.disableTakeover(this.serverUrl(), this.token(), this.sessionId);
       this.syncSessionMeta(session);
       this.takeoverOn = session.takeover;
+      this.loadRuntimeState();
       showToast(value ? $r('app.string.session_takeover_on_toast')
         : $r('app.string.session_takeover_off_toast'));
     } catch (error) {
@@ -795,6 +976,14 @@ export struct SessionDetailPage {
       role: 'user',
       text: content,
       kind: null,
+      command: null,
+      output: null,
+      toolName: null,
+      targetPath: null,
+      query: null,
+      description: null,
+      action: null,
+      changes: [],
       clientMessageId: clientMessageId,
       orderSeq: maxOrderSeq + 1,
       revision: 1,
@@ -1551,6 +1740,85 @@ export struct SessionDetailPage {
     return getColors().primaryAction;
   }
 
+  private noticeSurfaceColor(severity: string): string {
+    if (severity === 'error') {
+      return getColors().errorSurface;
+    }
+    if (severity === 'success') {
+      return getColors().successSurface;
+    }
+    return getColors().warningSurface;
+  }
+
+  private noticeBorderColor(severity: string): string {
+    if (severity === 'error') {
+      return getColors().errorBorder;
+    }
+    if (severity === 'success') {
+      return getColors().successBorder;
+    }
+    return getColors().warningBorder;
+  }
+
+  // Composer palette mirrored from Android SessionComposer.kt (MessageComposer/ComposerActions).
+  private composerCardSurface(): string {
+    return this.themeIsDark ? getColors().raisedSurface : '#F2FFFFFF';
+  }
+
+  private composerCardBorder(): string {
+    return this.themeIsDark ? getColors().border : '#EFEDE9';
+  }
+
+  private composerInputColor(): string {
+    if (!this.sendInputAllowed()) {
+      return this.themeIsDark ? '#A1A1AA' : '#8A8984';
+    }
+    return this.themeIsDark ? '#EDEDEF' : '#252622';
+  }
+
+  private composerPlusColor(): string {
+    return this.themeIsDark ? '#A1A1AA' : '#2D2E2B';
+  }
+
+  private takeoverTrackColor(): string {
+    if (this.takeoverOn) {
+      return this.themeIsDark ? '#52525B' : '#2F302D';
+    }
+    return this.themeIsDark ? '#303033' : '#D8D6D1';
+  }
+
+  private takeoverKnobColor(): string {
+    if (this.themeIsDark || this.takeoverOn) {
+      return '#FFFFFF';
+    }
+    return '#FDFCFB';
+  }
+
+  private takeoverLabelColor(): string {
+    if (this.takeoverOn) {
+      return this.themeIsDark ? '#EDEDEF' : '#2F302D';
+    }
+    return this.themeIsDark ? '#A1A1AA' : '#3A3935';
+  }
+
+  private canSendDraft(): boolean {
+    return this.composerInput.trim().length > 0 && this.sendInputAllowed();
+  }
+
+  private sendButtonSurface(): string {
+    if (this.canSendDraft()) {
+      return this.themeIsDark ? '#FAFAFA' : '#2B2B2B';
+    }
+    return this.themeIsDark ? '#3F3F46' : '#E2E0DC';
+  }
+
+  private sendButtonIconColor(): string {
+    if (this.canSendDraft()) {
+      return this.themeIsDark ? '#09090B' : '#FFFFFF';
+    }
+    return this.themeIsDark ? '#71717A' : '#A7A5A0';
+  }
+
   private actionStyleColor(style: string): string {
     if (style === 'primary') {
       return getColors().primaryAction;
@@ -1729,15 +1997,16 @@ export struct SessionDetailPage {
         this.attachmentView(entry, attachment)
       }, (attachment: RemoteTimelineAttachment) => attachment.fileId)
       if (entry.blocks.length > 0) {
-        this.blocksView(entry.blocks, getColors().onPrimaryAction, getColors().mdLinkOnPrimary,
-          getColors().mdInlineOnPrimary, getColors().mdCodeOnPrimary, getColors().mdCodePanelText, 16.5)
+        this.blocksView(entry.blocks, getColors().sessionMessageText, getColors().mdLinkOnPrimary,
+          getColors().mdInlineOnSurface, getColors().mdCodeOnSurface, getColors().mdCodePanelText, 16.5,
+          this.userContentMaxVp)
       }
     }
     .alignItems(HorizontalAlign.Start)
-    .constraintSize({ maxWidth: '78%' })
+    .constraintSize({ maxWidth: this.userBubbleMaxVp })
     .padding({ left: 17, right: 17, top: 13, bottom: 13 })
     .borderRadius(22)
-    .backgroundColor(getColors().primaryAction)
+    .backgroundColor(getColors().sessionMessageBubble)
   }
 
   @Builder
@@ -1748,14 +2017,13 @@ export struct SessionDetailPage {
       }, (attachment: RemoteTimelineAttachment) => attachment.fileId)
       if (entry.blocks.length > 0) {
         this.blocksView(entry.blocks, getColors().sessionMessageText, getColors().mdLinkOnPrimary,
-          getColors().mdInlineOnSurface, getColors().mdCodeOnSurface, getColors().mdCodePanelText, 17)
+          getColors().mdInlineOnSurface, getColors().mdCodeOnSurface, getColors().mdCodePanelText, 17,
+          this.assistantContentMaxVp)
       }
     }
     .alignItems(HorizontalAlign.Start)
-    .constraintSize({ maxWidth: '85%' })
-    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
-    .borderRadius(12)
-    .backgroundColor(getColors().sessionMessageBubble)
+    .constraintSize({ maxWidth: this.assistantBubbleMaxVp })
+    .padding({ left: 4, right: 4 })
   }
 
   /**
@@ -1764,10 +2032,13 @@ export struct SessionDetailPage {
    */
   @Builder
   blocksView(blocks: MdBlock[], textColor: string, linkColor: string, inlineCodeColor: string,
-    codePanelColor: string, codePanelTextColor: string, fontSize: number) {
+    codePanelColor: string, codePanelTextColor: string, fontSize: number, contentMaxWidthVp: number) {
     ForEach(blocks, (block: MdBlock, index: number) => {
       if (this.isDiffBlock(block)) {
-        DiffCodeView({ codeText: block.codeText })
+        DiffCodeView({
+          codeText: block.codeText,
+          contentMaxWidthVp: contentMaxWidthVp
+        })
       } else {
         AgentMarkdownView({
           blocks: [block],
@@ -1776,7 +2047,8 @@ export struct SessionDetailPage {
           inlineCodeColor: inlineCodeColor,
           codePanelColor: codePanelColor,
           codePanelTextColor: codePanelTextColor,
-          fontSize: fontSize
+          fontSize: fontSize,
+          contentMaxWidthVp: contentMaxWidthVp
         })
       }
     }, (block: MdBlock, index: number) => `${index}_${block.kind}_${block.language}_${block.codeText.length}`)
@@ -1791,14 +2063,14 @@ export struct SessionDetailPage {
         }
         .width('100%')
         .justifyContent(FlexAlign.End)
-        .padding({ left: 32, right: 12, top: 2, bottom: 2 })
+        .padding({ top: 2, bottom: 2 })
       } else if (entry.item.role === 'assistant') {
         Row() {
           this.assistantContentView(entry)
         }
         .width('100%')
         .justifyContent(FlexAlign.Start)
-        .padding({ left: 12, right: 32, top: 2, bottom: 2 })
+        .padding({ top: 2, bottom: 2 })
       } else {
         Text(entry.item.text)
           .fontSize(12)
@@ -1809,38 +2081,91 @@ export struct SessionDetailPage {
           .copyOption(CopyOptions.LocalDevice)
       }
     } else {
-      Row({ space: 8 }) {
-        Column({ space: 2 }) {
-          Row({ space: 6 }) {
-            Text(entry.item.type)
-              .fontSize(10)
-              .fontColor(this.itemLabelColor(entry.item.status))
-              .padding({ left: 6, right: 6, top: 1, bottom: 1 })
-              .borderRadius(4)
-              .backgroundColor(getColors().sessionCodeSurface)
-            if (this.itemRunning(entry.item.status)) {
-              LoadingProgress()
-                .width(12)
-                .height(12)
-            }
-          }
-          Text(entry.item.text)
+      if (this.isSystemLikeItem(entry.item.type)) {
+        Row({ space: 8 }) {
+          SymbolGlyph(this.itemDestructive(entry.item) ? $r('sys.symbol.exclamationmark_circle') : $r('sys.symbol.clock'))
+            .fontSize(16)
+            .width(16)
+            .height(16)
+            .fontColor([this.systemItemAccentColor(entry.item)])
+          Text(this.systemItemDisplayText(entry.item))
             .fontSize(13)
-            .fontColor(getColors().muted)
-            .maxLines(8)
-            .textOverflow({ overflow: TextOverflow.Ellipsis })
-            .width('100%')
+            .fontWeight(700)
+            .fontColor(this.systemItemAccentColor(entry.item))
+            .layoutWeight(1)
+            .copyOption(CopyOptions.LocalDevice)
+          if (this.systemItemShowsPill(entry.item.type)) {
+            Text(entry.item.status)
+              .fontSize(11)
+              .lineHeight(11)
+              .fontWeight(700)
+              .fontColor(this.itemDestructive(entry.item) ? getColors().errorText : getColors().sessionStatusNeutralText)
+              .constraintSize({ minWidth: 40 })
+              .height(20)
+              .textAlign(TextAlign.Center)
+              .borderRadius(10)
+              .backgroundColor(this.itemDestructive(entry.item) ? getColors().errorSurface : getColors().sessionStatusNeutralSurface)
+              .padding({ left: 8, right: 8 })
+          }
         }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
+        .width('100%')
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: 4, right: 4, top: 4, bottom: 4 })
+      } else {
+        Row({ space: 8 }) {
+          Column({ space: 2 }) {
+            Row({ space: 6 }) {
+              Text(entry.item.type)
+                .fontSize(10)
+                .fontColor(this.itemLabelColor(entry.item.status))
+                .padding({ left: 6, right: 6, top: 1, bottom: 1 })
+                .borderRadius(4)
+                .backgroundColor(getColors().sessionCodeSurface)
+              if (this.itemRunning(entry.item.status)) {
+                LoadingProgress()
+                  .width(12)
+                  .height(12)
+              }
+            }
+            Text(entry.item.text)
+              .fontSize(13)
+              .fontColor(getColors().muted)
+              .maxLines(8)
+              .textOverflow({ overflow: TextOverflow.Ellipsis })
+              .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .layoutWeight(1)
+        }
+        .width('100%')
+        .alignItems(VerticalAlign.Top)
+        .padding(10)
+        .borderRadius(10)
+        .backgroundColor(getColors().subtle)
+        .border({ width: 1, color: getColors().border })
       }
-      .width('100%')
-      .alignItems(VerticalAlign.Top)
-      .padding(10)
-      .borderRadius(10)
-      .backgroundColor(getColors().subtle)
-      .border({ width: 1, color: getColors().border })
     }
+  }
+
+  private isSystemLikeItem(type: string): boolean {
+    return type === 'system' || type === 'marker' || type === 'error' || type === 'diagnostic';
+  }
+
+  private itemDestructive(item: RemoteTimelineItem): boolean {
+    return item.type === 'error' || item.status === 'failed' || item.status === 'cancelled' ||
+      item.status === 'interrupted';
+  }
+
+  private systemItemDisplayText(item: RemoteTimelineItem): string {
+    return item.text.length > 0 ? item.text : item.type;
+  }
+
+  private systemItemAccentColor(item: RemoteTimelineItem): string {
+    return this.itemDestructive(item) ? getColors().errorIcon : getColors().muted;
+  }
+
+  private systemItemShowsPill(type: string): boolean {
+    return type === 'marker' || type === 'error' || type === 'system';
   }
 
   private noticeSchemaFieldsFor(notice: RemoteRuntimeNotice, actionId: string): NoticeInputField[] {
@@ -2049,8 +2374,40 @@ export struct SessionDetailPage {
     .alignItems(HorizontalAlign.Start)
     .padding(14)
     .borderRadius(RadiusTokens.noticeCard)
-    .backgroundColor(getColors().warningSurface)
-    .border({ width: 1, color: getColors().warningBorder })
+    .backgroundColor(this.noticeSurfaceColor(notice.severity))
+    .border({ width: 1, color: this.noticeBorderColor(notice.severity) })
+  }
+
+  @Builder
+  headerMenusBuilder() {
+    Row({ space: 2 }) {
+      Row() {
+        SymbolGlyph($r('sys.symbol.folder'))
+          .fontSize(19)
+          .fontColor([getColors().ink])
+      }
+      .width(38)
+      .height(38)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(VerticalAlign.Center)
+      .onClick(() => {
+        this.navPathStack.pushPathByName('session_agent_files', this.sessionId);
+      })
+      Row() {
+        SymbolGlyph($r('sys.symbol.share'))
+          .fontSize(19)
+          .fontColor([getColors().ink])
+      }
+      .width(38)
+      .height(38)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(VerticalAlign.Center)
+      .enabled(!this.shareBusy)
+      .onClick(() => {
+        this.shareSession();
+      })
+    }
+    .alignItems(VerticalAlign.Center)
   }
 
   build() {
@@ -2089,7 +2446,7 @@ export struct SessionDetailPage {
           .layoutWeight(1)
           .justifyContent(FlexAlign.Center)
         } else {
-          List({ space: 4, scroller: this.scroller }) {
+          List({ space: 16, scroller: this.scroller }) {
             if (this.hasMoreHistory) {
               ListItem() {
                 Button(this.historyButtonLabel())
@@ -2104,7 +2461,7 @@ export struct SessionDetailPage {
               }
               .width('100%')
             }
-            if (this.entries.length === 0) {
+            if (this.sections.length === 0) {
               ListItem() {
                 Text($r('app.string.session_no_messages'))
                   .fontSize(14)
@@ -2114,20 +2471,44 @@ export struct SessionDetailPage {
                   .padding({ top: 24, bottom: 24 })
               }
             }
-            ForEach(this.entries, (entry: TimelineEntry) => {
+            ForEach(this.sections, (section: SessionSection) => {
               ListItem() {
-                this.entryView(entry)
+                if (section.kind === 'entry' && section.entry !== null) {
+                  this.entryView(section.entry)
+                } else if (section.kind === 'tool' && section.toolRow !== null) {
+                  TimelineToolEntry({
+                    model: section.toolRow,
+                    workingDir: this.sessionCwd(),
+                    contentMaxWidthVp: this.assistantContentMaxVp
+                  })
+                } else if (section.kind === 'group' && section.group !== null) {
+                  TimelineToolGroupEntry({
+                    group: section.group,
+                    workingDir: this.sessionCwd(),
+                    contentMaxWidthVp: this.assistantContentMaxVp
+                  })
+                }
               }
-            }, (entry: TimelineEntry) => `${entry.item.id}_${entry.item.revision}_${entry.item.updatedSeq}`)
-            ForEach(this.notices, (notice: RemoteRuntimeNotice) => {
+            }, (section: SessionSection) => `${section.kind}_${section.entryKey}`)
+            if (this.canInterrupt) {
               ListItem() {
-                this.noticeView(notice)
+                Row({ space: 8 }) {
+                  LoadingProgress()
+                    .width(14)
+                    .height(14)
+                  Text($r('app.string.session_tool_running'))
+                    .fontSize(13)
+                    .fontColor(getColors().muted)
+                }
+                .width('100%')
+                .alignItems(VerticalAlign.Center)
               }
-            }, (notice: RemoteRuntimeNotice) => notice.noticeId)
+              .width('100%')
+            }
           }
           .width('100%')
           .layoutWeight(1)
-          .padding({ left: 8, right: 8, top: 4 })
+          .padding({ left: 20, right: 20, top: 4 })
         }
         if (this.commandSuggestions.length > 0) {
           Column() {
@@ -2156,41 +2537,170 @@ export struct SessionDetailPage {
           .borderRadius(10)
           .backgroundColor(getColors().canvas)
           .border({ width: 1, color: getColors().border })
+          .shadow({ radius: 16, color: this.themeIsDark ? '#66000000' : '#1F000000' })
         }
-        if (this.pendingAttachments.length > 0) {
-          Flex({ wrap: FlexWrap.Wrap }) {
-            ForEach(this.pendingAttachments, (attachment: RemoteUploadedAttachment) => {
-              Row({ space: 4 }) {
-                Text(attachment.name)
-                  .fontSize(11)
-                  .fontColor(getColors().ink)
-                  .maxLines(1)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .constraintSize({ maxWidth: 140 })
-                  .copyOption(CopyOptions.LocalDevice)
-                Text('✕')
-                  .fontSize(11)
-                  .fontColor(getColors().muted)
-                  .padding({ left: 2, right: 2 })
-                  .onClick(() => {
-                    this.removePendingAttachment(attachment.fileId);
-                  })
+        if (this.attachmentPanelOpen && this.capabilityAllowed(SESSION_ATTACHMENT_CAPABILITY)) {
+          Column({ space: 6 }) {
+            Row({ space: 14 }) {
+              Row() {
+                SymbolGlyph($r('sys.symbol.camera'))
+                  .fontSize(20)
+                  .fontColor([this.themeIsDark ? '#F4F4F5' : '#2F302D'])
               }
-              .padding({ left: 8, right: 8, top: 4, bottom: 4 })
-              .borderRadius(12)
-              .backgroundColor(getColors().secondaryActionBorder)
-              .margin({ right: 6, bottom: 4 })
-            }, (attachment: RemoteUploadedAttachment) => attachment.fileId)
+              .width(42)
+              .height(42)
+              .borderRadius(21)
+              .backgroundColor(this.themeIsDark ? '#3A3A3D' : '#F1F1EF')
+              .justifyContent(FlexAlign.Center)
+              .alignItems(VerticalAlign.Center)
+              Text($r('app.string.session_attachment_camera'))
+                .fontSize(16)
+                .fontWeight(600)
+                .fontColor(this.themeIsDark ? '#F4F4F5' : '#2F302D')
+                .maxLines(1)
+                .layoutWeight(1)
+            }
+            .width('100%')
+            .height(50)
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => {
+              this.attachmentPanelOpen = false;
+              this.capturePhoto();
+            })
+            Row({ space: 14 }) {
+              Row() {
+                SymbolGlyph($r('sys.symbol.picture'))
+                  .fontSize(20)
+                  .fontColor([this.themeIsDark ? '#F4F4F5' : '#2F302D'])
+              }
+              .width(42)
+              .height(42)
+              .borderRadius(21)
+              .backgroundColor(this.themeIsDark ? '#3A3A3D' : '#F1F1EF')
+              .justifyContent(FlexAlign.Center)
+              .alignItems(VerticalAlign.Center)
+              Text($r('app.string.session_attachment_photos'))
+                .fontSize(16)
+                .fontWeight(600)
+                .fontColor(this.themeIsDark ? '#F4F4F5' : '#2F302D')
+                .maxLines(1)
+                .layoutWeight(1)
+            }
+            .width('100%')
+            .height(50)
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => {
+              this.attachmentPanelOpen = false;
+              this.pickLocalImages();
+            })
+            Row({ space: 14 }) {
+              Row() {
+                SymbolGlyph($r('sys.symbol.doc'))
+                  .fontSize(20)
+                  .fontColor([this.themeIsDark ? '#F4F4F5' : '#2F302D'])
+              }
+              .width(42)
+              .height(42)
+              .borderRadius(21)
+              .backgroundColor(this.themeIsDark ? '#3A3A3D' : '#F1F1EF')
+              .justifyContent(FlexAlign.Center)
+              .alignItems(VerticalAlign.Center)
+              Text($r('app.string.session_attachment_file'))
+                .fontSize(16)
+                .fontWeight(600)
+                .fontColor(this.themeIsDark ? '#F4F4F5' : '#2F302D')
+                .maxLines(1)
+                .layoutWeight(1)
+            }
+            .width('100%')
+            .height(50)
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => {
+              this.attachmentPanelOpen = false;
+              this.pickLocalFiles();
+            })
+            Row({ space: 14 }) {
+              Row() {
+                SymbolGlyph($r('sys.symbol.link'))
+                  .fontSize(20)
+                  .fontColor([this.themeIsDark ? '#F4F4F5' : '#2F302D'])
+              }
+              .width(42)
+              .height(42)
+              .borderRadius(21)
+              .backgroundColor(this.themeIsDark ? '#3A3A3D' : '#F1F1EF')
+              .justifyContent(FlexAlign.Center)
+              .alignItems(VerticalAlign.Center)
+              Text($r('app.string.session_attachment_url'))
+                .fontSize(16)
+                .fontWeight(600)
+                .fontColor(this.themeIsDark ? '#F4F4F5' : '#2F302D')
+                .maxLines(1)
+                .layoutWeight(1)
+            }
+            .width('100%')
+            .height(50)
+            .alignItems(VerticalAlign.Center)
+            .onClick(() => {
+              this.attachmentPanelOpen = false;
+              this.attachmentUrlMode = true;
+            })
+          }
+          .width(270)
+          .padding({ left: 18, right: 18, top: 10, bottom: 10 })
+          .borderRadius(24)
+          .backgroundColor(this.themeIsDark ? '#202023' : '#FFFFFF')
+          .border({ width: 1, color: this.themeIsDark ? '#38383C' : '#EFEDE9' })
+          .alignSelf(ItemAlign.Start)
+          .margin({ left: 14, bottom: 10 })
+          .shadow({ radius: 20, color: this.themeIsDark ? '#80000000' : '#29000000' })
+        }
+        if (this.notices.length > 0) {
+          Column({ space: 8 }) {
+            this.noticeView(this.notices[0])
+            if (this.notices.length > 1) {
+              Text(this.localText($r('app.string.session_tool_more_notices'))
+                .replace('%1$d', `${this.notices.length - 1}`))
+                .fontSize(12)
+                .fontColor(getColors().muted)
+                .padding({ left: 12, right: 12, top: 6, bottom: 6 })
+                .borderRadius(12)
+                .backgroundColor(getColors().subtle)
+            }
           }
           .width('100%')
-          .padding({ left: 12, right: 12, top: 4 })
+          .alignItems(HorizontalAlign.Start)
+          .padding({ left: 14, right: 14 })
         }
-        if (this.attachmentPanelOpen) {
-          Column({ space: 8 }) {
-            Text($r('app.string.session_add_attachment_url'))
-              .fontSize(11)
-              .fontColor(getColors().muted)
-              .width('100%')
+        Column({ space: 10 }) {
+          if (this.pendingAttachments.length > 0) {
+            Flex({ wrap: FlexWrap.Wrap }) {
+              ForEach(this.pendingAttachments, (attachment: RemoteUploadedAttachment) => {
+                Row({ space: 4 }) {
+                  Text(attachment.name)
+                    .fontSize(11)
+                    .fontColor(getColors().ink)
+                    .maxLines(1)
+                    .textOverflow({ overflow: TextOverflow.Ellipsis })
+                    .constraintSize({ maxWidth: 140 })
+                    .copyOption(CopyOptions.LocalDevice)
+                  Text('✕')
+                    .fontSize(11)
+                    .fontColor(getColors().muted)
+                    .padding({ left: 2, right: 2 })
+                    .onClick(() => {
+                      this.removePendingAttachment(attachment.fileId);
+                    })
+                }
+                .padding({ left: 8, right: 8, top: 4, bottom: 4 })
+                .borderRadius(12)
+                .backgroundColor(getColors().secondaryActionBorder)
+                .margin({ right: 6, bottom: 4 })
+              }, (attachment: RemoteUploadedAttachment) => attachment.fileId)
+            }
+            .width('100%')
+          }
+          if (this.attachmentUrlMode) {
             Row({ space: 8 }) {
               TextInput({ text: this.attachmentUrlInput, placeholder: $r('app.string.session_attachment_url_placeholder') })
                 .fontSize(13)
@@ -2199,6 +2709,7 @@ export struct SessionDetailPage {
                 .backgroundColor(getColors().matchedAccountSurface)
                 .borderRadius(18)
                 .padding({ left: 12, right: 12 })
+                .enabled(!this.uploadingAttachment)
                 .onChange((value: string) => {
                   this.attachmentUrlInput = value;
                 })
@@ -2212,143 +2723,150 @@ export struct SessionDetailPage {
                 .onClick(() => {
                   this.addAttachmentFromUrl();
                 })
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Center)
-            Row({ space: 8 }) {
-              Button(this.localFileButtonLabel())
-                .fontSize(13)
-                .height(36)
-                .padding({ left: 14, right: 14 })
-                .backgroundColor(getColors().secondaryActionSurface)
-                .fontColor(getColors().ink)
-                .enabled(!this.pickingLocalFile)
+              Text('✕')
+                .fontSize(14)
+                .fontColor(getColors().muted)
+                .width(28)
+                .height(28)
+                .textAlign(TextAlign.Center)
                 .onClick(() => {
-                  this.pickLocalFiles();
-                })
-              Button(this.localImageButtonLabel())
-                .fontSize(13)
-                .height(36)
-                .padding({ left: 14, right: 14 })
-                .backgroundColor(getColors().secondaryActionSurface)
-                .fontColor(getColors().ink)
-                .enabled(!this.pickingLocalFile)
-                .onClick(() => {
-                  this.pickLocalImages();
-                })
-              Button(this.cameraButtonLabel())
-                .fontSize(13)
-                .height(36)
-                .padding({ left: 14, right: 14 })
-                .backgroundColor(getColors().secondaryActionSurface)
-                .fontColor(getColors().ink)
-                .enabled(!this.pickingLocalFile)
-                .onClick(() => {
-                  this.capturePhoto();
+                  this.attachmentUrlMode = false;
                 })
             }
             .width('100%')
             .alignItems(VerticalAlign.Center)
-          }
-          .width('100%')
-          .padding(12)
-          .borderRadius(10)
-          .backgroundColor(getColors().canvas)
-          .border({ width: 1, color: getColors().border })
-        }
-        if (this.capabilities !== null) {
-          Row({ space: 8 }) {
-            Text($r('app.string.session_takeover_label'))
-              .fontSize(13)
-              .fontColor(getColors().ink)
-              .layoutWeight(1)
-            Toggle({ type: ToggleType.Switch, isOn: this.takeoverOn })
-              .hitTestBehavior(HitTestMode.None)
-          }
-          .width('100%')
-          .padding({ left: 12, right: 12, top: 4, bottom: 4 })
-          .onClick(() => {
-            this.requestTakeoverChange(!this.takeoverOn);
-          })
-        }
-        Row({ space: 8 }) {
-          if (this.capabilityAllowed(SESSION_ATTACHMENT_CAPABILITY)) {
-            Button(this.attachmentButtonLabel())
-              .fontSize(16)
-              .width(36)
-              .height(36)
-              .borderRadius(18)
-              .backgroundColor(this.attachmentButtonBackground())
-              .fontColor(getColors().inkSoft)
-              .onClick(() => {
-                this.attachmentPanelOpen = !this.attachmentPanelOpen;
-              })
           }
           TextArea({ text: this.composerInput, placeholder: $r('app.string.session_message_placeholder') })
             .fontSize(16)
             .fontWeight(500)
-            .height(40)
-            .layoutWeight(1)
-            .backgroundColor(getColors().matchedAccountSurface)
-            .borderRadius(20)
-            .padding({ left: 12, right: 12, top: 8 })
+            .fontColor(this.composerInputColor())
+            .constraintSize({ minHeight: 28, maxHeight: 92 })
+            .backgroundColor(Color.Transparent)
+            .padding(0)
+            .placeholderColor(getColors().muted)
             .enabled(this.sendInputAllowed())
             .onChange((value: string) => {
               this.composerInput = value;
               this.updateCommandSuggestions();
             })
-          if (this.canInterrupt && this.capabilityAllowed(SESSION_INTERRUPT_CAPABILITY)) {
-            Button(this.interruptButtonLabel())
-              .fontSize(16)
-              .width(40)
-              .height(40)
-              .borderRadius(20)
-              .backgroundColor(getColors().errorSurface)
-              .fontColor(getColors().errorText)
-              .enabled(!this.interrupting)
+          Row() {
+            Row({ space: 9 }) {
+              if (this.capabilityAllowed(SESSION_ATTACHMENT_CAPABILITY)) {
+                Row() {
+                  SymbolGlyph($r('sys.symbol.plus'))
+                    .fontSize(15)
+                    .fontColor([this.composerPlusColor()])
+                }
+                .width(30)
+                .height(30)
+                .borderRadius(15)
+                .backgroundColor(this.themeIsDark ? '#00000000' : '#FFFFFF')
+                .justifyContent(FlexAlign.Center)
+                .alignItems(VerticalAlign.Center)
+                .onClick(() => {
+                  this.attachmentPanelOpen = !this.attachmentPanelOpen;
+                })
+              }
+              if (this.capabilities !== null) {
+                Row({ space: 5 }) {
+                  Row() {
+                    Circle()
+                      .width(12)
+                      .height(12)
+                      .fill(this.takeoverKnobColor())
+                  }
+                  .width(30)
+                  .height(18)
+                  .borderRadius(9)
+                  .backgroundColor(this.takeoverTrackColor())
+                  .justifyContent(this.takeoverOn ? FlexAlign.End : FlexAlign.Start)
+                  .alignItems(VerticalAlign.Center)
+                  .padding({ left: 3, right: 3 })
+                  Text($r('app.string.session_takeover_label'))
+                    .fontSize(12)
+                    .fontWeight(600)
+                    .fontColor(this.takeoverLabelColor())
+                    .maxLines(1)
+                }
+                .height(28)
+                .padding({ left: 4, right: 9 })
+                .borderRadius(14)
+                .backgroundColor(this.themeIsDark ? '#00000000' : '#FFFFFF')
+                .alignItems(VerticalAlign.Center)
+                .onClick(() => {
+                  if (!this.takeoverBusy) {
+                    this.requestTakeoverChange(!this.takeoverOn);
+                  }
+                })
+              }
+            }
+            .alignItems(VerticalAlign.Center)
+            if (this.canInterrupt && this.capabilityAllowed(SESSION_INTERRUPT_CAPABILITY)) {
+              Row() {
+                if (this.interrupting) {
+                  LoadingProgress()
+                    .width(17)
+                    .height(17)
+                    .color('#FFFFFF')
+                } else {
+                  Column()
+                    .width(10)
+                    .height(10)
+                    .borderRadius(2)
+                    .backgroundColor('#FFFFFF')
+                }
+              }
+              .width(34)
+              .height(34)
+              .borderRadius(12)
+              .backgroundColor('#EF4444')
+              .justifyContent(FlexAlign.Center)
+              .alignItems(VerticalAlign.Center)
               .onClick(() => {
-                this.interruptRuntime();
+                if (!this.interrupting) {
+                  this.interruptRuntime();
+                }
               })
-          } else {
-            Button(this.sendButtonLabel())
-              .fontSize(16)
-              .width(40)
-              .height(40)
-              .borderRadius(20)
-              .backgroundColor(getColors().primaryAction)
-              .fontColor(getColors().onPrimaryAction)
-              .enabled(!this.sending && !this.executingCommand && this.sendInputAllowed())
+            } else {
+              Row() {
+                if (this.sending || this.executingCommand) {
+                  LoadingProgress()
+                    .width(17)
+                    .height(17)
+                    .color(this.sendButtonIconColor())
+                } else {
+                  SymbolGlyph($r('sys.symbol.arrow_up'))
+                    .fontSize(17)
+                    .fontColor([this.sendButtonIconColor()])
+                }
+              }
+              .width(34)
+              .height(34)
+              .borderRadius(17)
+              .backgroundColor(this.sendButtonSurface())
+              .justifyContent(FlexAlign.Center)
+              .alignItems(VerticalAlign.Center)
               .onClick(() => {
-                this.sendMessage();
+                if (!this.sending && !this.executingCommand && this.sendInputAllowed()) {
+                  this.sendMessage();
+                }
               })
+            }
           }
+          .width('100%')
+          .height(34)
+          .justifyContent(FlexAlign.SpaceBetween)
+          .alignItems(VerticalAlign.Center)
         }
         .width('100%')
-        .alignItems(VerticalAlign.Center)
-        .padding({ left: 12, right: 12, top: 8, bottom: 12 })
-        Row() {
-          Button($r('app.string.session_agent_files'))
-            .fontSize(13)
-            .height(36)
-            .padding({ left: 14, right: 14 })
-            .backgroundColor(getColors().secondaryActionSurface)
-            .fontColor(getColors().ink)
-            .onClick(() => {
-              this.navPathStack.pushPathByName('session_agent_files', this.sessionId);
-            })
-          Button('Share')
-            .fontSize(13)
-            .height(36)
-            .padding({ left: 14, right: 14 })
-            .backgroundColor(getColors().secondaryActionSurface)
-            .fontColor(getColors().ink)
-            .enabled(!this.shareBusy)
-            .onClick(() => {
-              this.shareSession();
-            })
-        }
-        .width('100%')
-        .padding({ left: 12, right: 12, bottom: 4 })
+        .padding({ left: 16, right: 16, top: 16, bottom: 12 })
+        .borderRadius(22)
+        .backgroundColor(this.composerCardSurface())
+        .border({ width: 1, color: this.composerCardBorder() })
+        .margin({ left: 14, right: 14, bottom: 20 })
+        .onClick(() => {
+          this.handleReadOnlyComposerClick();
+        })
       }
       .width('100%')
       .height('100%')
@@ -2371,6 +2889,7 @@ export struct SessionDetailPage {
       .height('100%')
     }
     .title(this.title)
+    .menus(this.headerMenusBuilder)
     .onReady((ctx: NavDestinationContext) => {
       this.navPathStack = ctx.pathStack;
       const raw = ctx.pathInfo.param as string;

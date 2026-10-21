@@ -16,6 +16,11 @@
       "buildFunction": "DevicesPageBuilder"
     },
     {
+      "name": "device_detail",
+      "pageSourceFile": "src/main/ets/pages/DeviceDetailPage.ets",
+      "buildFunction": "DeviceDetailPageBuilder"
+    },
+    {
       "name": "terminal",
       "pageSourceFile": "src/main/ets/pages/TerminalPage.ets",
       "buildFunction": "TerminalPageBuilder"

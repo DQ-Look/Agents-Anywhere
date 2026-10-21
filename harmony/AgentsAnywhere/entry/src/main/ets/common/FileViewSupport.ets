@@ -9,6 +9,64 @@ export function isWindowsDriveStylePath(path: string): boolean {
   return isLetter && path.charAt(1) === ':';
 }
 
+// Windows-only entries that carry the hidden/system attribute or are legacy
+// compatibility junctions; the fs/list payload has no hidden flag, so these
+// well-known names are filtered client-side.
+const HIDDEN_WINDOWS_ENTRY_NAMES: string[] = [
+  'appdata',
+  'application data',
+  'config.msi',
+  'cookies',
+  'desktop.ini',
+  'documents and settings',
+  'dumpstack.log',
+  'dumpstack.log.tmp',
+  'hiberfil.sys',
+  'local settings',
+  'msocache',
+  'my documents',
+  'nethood',
+  'pagefile.sys',
+  'printhood',
+  'recent',
+  'recovery',
+  'sendto',
+  'start menu',
+  'swapfile.sys',
+  'system volume information',
+  'templates'
+];
+
+export function isHiddenFileEntryName(name: string, windowsDevice: boolean): boolean {
+  if (name.length === 0) {
+    return false;
+  }
+  if (name.charAt(0) === '.') {
+    return true;
+  }
+  if (!windowsDevice) {
+    return false;
+  }
+  if (name.charAt(0) === '$') {
+    return true;
+  }
+  const lower = name.toLowerCase();
+  for (let i = 0; i < HIDDEN_WINDOWS_ENTRY_NAMES.length; i++) {
+    if (lower === HIDDEN_WINDOWS_ENTRY_NAMES[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function isWindowsDeviceOs(deviceOs: string | null): boolean {
+  return deviceOs !== null && deviceOs.toLowerCase() === 'windows';
+}
+
+export function initialRemoteFilePath(deviceOs: string | null): string {
+  return isWindowsDeviceOs(deviceOs) ? '' : '.';
+}
+
 export function isWindowsDriveRootPath(path: string): boolean {
   if (!isWindowsDriveStylePath(path)) {
     return false;

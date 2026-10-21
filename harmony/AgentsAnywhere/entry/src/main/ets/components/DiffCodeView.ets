@@ -31,6 +31,12 @@ import { RadiusTokens } from '../designsystem/TypeTokens';
 export struct DiffCodeView {
   @StorageProp(APP_IS_DARK_KEY) themeIsDark: boolean = false;
   @Prop codeText: string = '';
+  // Absolute content width cap in vp, -1 disables (see AgentMarkdownView).
+  @Prop contentMaxWidthVp: number = -1;
+
+  private contentWidthCap(): number {
+    return this.contentMaxWidthVp > 0 ? this.contentMaxWidthVp : 100000;
+  }
 
   @State private lines: string[] = [];
 
@@ -74,8 +80,10 @@ export struct DiffCodeView {
         }, (line: string, index: number) => `${index}`)
       }
       .width('100%')
+      .constraintSize({ maxWidth: this.contentWidthCap() })
     }
     .width('100%')
+    .constraintSize({ maxWidth: this.contentWidthCap() })
     .padding({ left: 8, right: 8, top: 8, bottom: 8 })
     .borderRadius(RadiusTokens.codePanel)
     .backgroundColor(getColors().sessionCodeSurface)
@@ -95,9 +103,11 @@ export struct DiffCodeView {
         .fontFamily('monospace')
         .fontColor(this.lineTextColor(this.lineKind(line)))
         .width('100%')
+        .constraintSize({ maxWidth: this.contentWidthCap() })
         .copyOption(CopyOptions.LocalDevice)
     }
     .width('100%')
+    .constraintSize({ maxWidth: this.contentWidthCap() })
     .padding({ top: 1, bottom: 1 })
     .borderRadius(4)
     .backgroundColor(this.lineSurface(this.lineKind(line)))

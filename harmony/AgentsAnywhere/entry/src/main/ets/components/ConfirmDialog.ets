@@ -34,6 +34,7 @@ export struct ConfirmDialog {
   confirmText: ResourceStr = $r('app.string.profile_sign_out');
   cancelText: ResourceStr = $r('app.string.profile_cancel');
   confirmIsDanger: boolean = false;
+  showCancel: boolean = true;
   onConfirm: () => void = () => {};
   onCancel: () => void = () => {};
 
@@ -50,16 +51,18 @@ export struct ConfirmDialog {
         .lineHeight(20)
         .fontColor(getColors().inkSoft)
       Row({ space: 10 }) {
-        Button(this.cancelText)
-          .fontSize(15)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(getColors().inkSoft)
-          .backgroundColor(getColors().subtle)
-          .height(42)
-          .layoutWeight(1)
-          .onClick(() => {
-            this.onCancel();
-          })
+        if (this.showCancel) {
+          Button(this.cancelText)
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(getColors().inkSoft)
+            .backgroundColor(getColors().subtle)
+            .height(42)
+            .layoutWeight(1)
+            .onClick(() => {
+              this.onCancel();
+            })
+        }
         Button(this.confirmText)
           .fontSize(15)
           .fontWeight(FontWeight.Medium)

@@ -1,4 +1,4 @@
-# 鸿蒙 vs 安卓 功能对齐状态（2026-10-20 第八轮更新）
+# 鸿蒙 vs 安卓 功能对齐状态（2026-10-21 第二十一轮更新）
 
 调查对象：`android/`（Kotlin 参考端）与 `harmony/AgentsAnywhere`（ArkTS，API 26）。
 本文档为**当前状态快照**：此前多轮差距清单中的项目已按批次实现并逐批通过 `devecocli build` 验证。每批实现均以安卓源码与 Server 契约（`server/agent_server/api/`）逐字段核对。
@@ -23,8 +23,102 @@
 - **侧边栏显示（B8，对齐安卓 HomeSidebarViewMode/SidebarViewPopup/HomeList）**：Profile 抽屉语言卡后新增"侧边栏显示"卡（list_bullet 图标 + trailing 当前视图 + 下拉弹层：项目视图 folder/会话视图 list_bullet，286 宽弹层锚定行下方含 px2vp 换算）；新增 `auth/SidebarViewModeStore.ets` 全局持久化（AppStorage `appSidebarViewMode` + preferences，normalize 仿安卓，EntryAbility 初始化）；首页消费：Project 模式维持项目树，Session 模式渲染平铺会话列表（置顶/最近可折叠分区 + 分区空文案 + 66 高会话行：agent 品牌图标 + 16 Bold 标题 + 11.2 "设备 · 项目"上下文标签 + 状态指示器，对齐安卓 HomeSessionRow/sidebarContextLabel；保持服务器顺序仅按 pinned 拆分）；会话视图空态改 home_no_sessions + 新建会话按钮；模式切换经 `@StorageProp + @Watch` 即时重渲染
 - 验证：模拟器实测外观菜单锚定正确（三选项紧随行下）+ 深色/浅色切换生效；侧边栏弹层（菜单 y 1360 = 行底 1346 + 4vp）；会话视图分区渲染（"工作笔记本 · Mihu"上下文标签）、置顶分区折叠/展开往返、重启后偏好保持、切回项目视图恢复项目树
 - 沉淀规则：**`getRectangleById` 返回 px、`position()` 接收 vp，必须 px2vp 换算**；**page-root 级 id 与页内组件坐标基准不一致，锚点测量须用页内零尺寸 marker 校准**；应用 JS hilog 不进 `hilog -x` 捕获缓冲（连 EntryAbility testTag 都不在），日志排查无效，测量类调试优先"界面 debug Text + dumpLayout origBounds"
+2026-10-20 第九轮（会话详情页气泡格式对齐安卓）：
+- **用户气泡颜色修正**：backgroundColor 从 `primaryAction`（黑/白按钮色，导致黑底白字反色气泡）改为 `sessionMessageBubble`（亮 #F1F0ED / 暗 #2A2A2A，对齐安卓 SessionMessages user bubble 色）；文字/md 链接/行内代码色从 `onPrimaryAction/mdLinkOnPrimary/mdInlineOnPrimary/mdCodeOnPrimary`（白底对比色）改为 `sessionMessageText/mdLinkOnPrimary/mdInlineOnSurface/mdCodeOnSurface`（浅纸底对比色）
+- **助手消息移除气泡卡片**：原实现套 borderRadius(12)+backgroundColor 卡片包装，对齐安卓 AgentMessageContent 裸 markdown（无背景卡片，仅 padding(horizontal=4.dp)）；移除 borderRadius/backgroundColor，padding 12,8→4 left/right only
+- **消息列表间距**：List space 4→16vp（对齐安卓 verticalSpacing=16dp）；水平 padding 8→20vp（对齐安卓 horizontalPadding=20dp）
+- **Notice 卡片严重级别着色**：原实现固定 warningSurface/warningBorder，对齐安卓按 severity 动态着色——error 用 errorSurface/errorBorder、success 用 successSurface/successBorder、warning 保留 warningSurface/warningBorder；新增 ColorTokens `successBorder`（亮 #5216A34A / 暗 #5222C55E，32% alpha 成功强调色边框，对齐安卓边框 alpha 模式）
+2026-10-20 第十轮（输入区重构，响应用户反馈"输入框位置、下面两个按钮"）：
+- **Composer 卡片化（对齐安卓 MessageComposer/ComposerActions）**：删除散落的 ＋ 按钮/独立 TextArea/全宽接管开关行/底部"Agent files"+"Share"按钮行；改为单张圆角卡片（r22，亮 #F2FFFFFF/暗 raisedSurface 底 + 亮 #EFEDE9/暗 border 边框，padding 16/16/16/12，水平 margin 14）：内含待发附件 chips → 透明 TextArea（16sp/500，minHeight 28/maxHeight 92，placeholder muted）→ 34 高操作行（SpaceBetween：左 [＋30 圆钮 + 接管胶囊(自定义 30×18 开关 + 12sp 标签，点击弹确认)]，右 [34 圆形主操作钮——发送态黑底 arrow_up（有内容才点亮 #2B2B2B/#FAFAFA，空态 #E2E0DC/#3F3F46）/中断态红底 #EF4444 白方块/busy LoadingProgress]）
+- **附件来源菜单弹层**：＋ 按钮改为弹 270 宽菜单（相机/照片/文件/链接上传四行，42 圆图标钮 + 16sp SemiBold 标签，对齐安卓 AttachmentSourceMenu）；"链接上传"展开卡片内 URL 输入行（TextInput + Add + ✕ 关闭）
+- **Agent files / Share 移入标题栏**：删除底部双按钮行，改 NavDestination `.menus()` 自定义 Builder（folder → session_agent_files 路由、share → shareSession），功能不丢失
+- 新增 12 个 composer 配色辅助方法（themeIsDark 分支取安卓 SessionComposer.kt 逐值）；三份 string.json 补 session_attachment_photos/file/url
+- 注意坑：`.alignSelf()` 参数是 `ItemAlign` 而非 `HorizontalAlign`（Column/Flex 子组件对齐）
+- **修复输入框无法输入（能力集解析 bug）**：`GET /sessions/{id}/runtime/capabilities` 返回 `ProtocolCapabilitiesResponse = {connectorId, capabilitySet: {revision, capabilities}, serverTime}`，安卓先解包 `capabilitySet` 再解析；鸿蒙原实现把顶层响应直接喂给 `parseRemoteRuntimeCapabilitySet`（在顶层找 `capabilities` 数组→恒空）→ 解析出**空能力集**（非 null）→ `sendInputAllowed()` 恒 false → 输入框被禁用且 ＋/接管等能力门控全部失效。修复：SessionsApi 先 `objGetRecord(response, 'capabilitySet')` 解包再解析（SessionsApi.ets）。模拟器实测：TextArea enabled:true → 点击聚焦键盘弹出 → `uitest uiInput inputText` 输入 "HelloTest123" 成功出现在输入框
+2026-10-20 第十二轮（接管门控对齐，响应用户反馈"我还是点不动"）：
+- **根因**：服务端 `allowed = runtime_allowed and session.takeover`（effective_capabilities.py platform_scoped_session_capability）——会话未开"接管"时 `session.send_message.allowed=false`，输入框禁用是**设计行为**；但鸿蒙缺安卓的只读引导，用户以为坏了。注：用户此前"点不动"的另一会话实为接管未开（区别于第十一轮的能力解析 bug，那个会话用户曾开过接管）
+- **只读输入框双击引导（对齐安卓 handleReadOnlyComposerClick）**：输入被禁用时连点两下 composer 卡片（卡片 `.onClick` + disabled TextArea 点击穿透父级）：连接器离线 → 弹"设备已离线"单按钮弹窗（ConfirmDialog 新增 `showCancel: false` 单按钮模式）；在线且未开接管 → 直接弹"开启接管"确认框；`takeoverBusy` 防重入、`readOnlyComposerTapCount` 计数器与安卓一致
+- **输入门控补齐安卓 sessionComposerEnabled 语义**：`sendInputAllowed()` 由"能力 usable 即可"改为 `takeoverOn && capabilities !== null && (send/commands/execute usable)`——修复进入页面时能力未加载（null→放行）导致的"先可用后禁用"竞态；`syncSessionMeta` 同步 `takeoverOn`（原来只在 loadRuntimeState/setTakeover 同步）
+- **接管切换后显式刷新能力**：鸿蒙无安卓 `applyCapabilitiesObservation` 实时能力推送通道，`setTakeover` 成功后追加 `loadRuntimeState()` 重取能力，否则开启接管后输入框仍禁用
+- 新增字符串：common_ok / session_device_offline_title / session_device_offline_body（中/英）
+- 模拟器全流程实测：胶囊关闭接管 → 输入框 0.4s 内禁用 → 双击禁用输入区 → 弹"开启接管" → 确认 → 输入框恢复 enabled → `uitest uiInput inputText` 注入 "FinalCheck456" 成功
+2026-10-20 第十三轮（system 项样式 + 气泡宽度逃逸修复，响应用户反馈"system是什么哦"+"我发的消息气泡没有包住"）：
+- **system/marker/error/diagnostic 项对齐安卓 ToolPlaceholder**（SessionMessages.kt 2200）：原来非消息项渲染成卡片 + 裸 `type` 文字 chip（用户看到"system"不知何物）；现改为无卡片行样式：16vp Clock/CircleAlert 图标（destructive=status failed/cancelled/interrupted 或 type=error 时用 exclamationmark_circle + errorIcon 色）+ 13sp Bold displayText（`text.ifBlank{type}`，muted 色）+ status 胶囊（仅 marker/error/system 显示：11sp Bold、minWidth 40/高 20、r10，中性 sessionStatusNeutralSurface/Text 或 destructive errorSurface/errorText）；diagnostic 不显示胶囊（对齐安卓 kind 集合）
+- **用户消息气泡文字溢出修复**：根因——气泡 `constraintSize({maxWidth:'78%'})` 的百分比会污染后代百分比解析基准，内部 markdown `width('100%')` 按 0.78×窗口（1280px）而非行内容（986px）解析 → 段落 Text 单行 822px 不换行、溢出气泡右缘（实测"你检查一下我现在的会话历史有多少"文本 [458,1454][1280,1602] 顶到屏幕边缘）。修复策略（绝对值化）：`aboutToAppear` 用 `display.getDefaultDisplaySync()`（px/densityPixels 换算 vp）计算 `userBubbleMaxVp=floor((winVp-84)*0.78)`、`userContentMaxVp=bubble-34`、`assistantBubbleMaxVp=floor((winVp-84)*0.85)`、`assistantContentMaxVp=bubble-8`（84=列表 40 + 行 padding 44）；气泡 constraintSize 改绝对 vp
+- **AgentMarkdownView/MdCodePanelView/DiffCodeView 全链宽度钳制**：新增 `@Prop contentMaxWidthVp: number = -1` + `contentWidthCap()`（>0 用之，否则 100000 no-op，未传 cap 的调用点零回归）；hug 节点（段落/heading/根 Column）以 `constraintSize({maxWidth: cap})` 替换 `width('100%')`（短消息仍 hug，无百分号即无逃逸）；stretch 节点（quote/table/tableRow/Divider/listItem Row/代码面板根与内层）保留 `width('100%')` + 追加绝对 constraintSize cap；嵌套 AgentMarkdownView/MdCodePanelView/DiffCodeView 逐层透传 cap
+- 已知残留：compact 分隔符（安卓 CompactTimelineSeparator，"Compacting context"等文案）未实现——鸿蒙 RemoteTimelineItem DTO 无 contentKind/title/rawContent 字段，服务端有但未解析，待后续补 DTO
+- 模拟器实测：同一消息文本 [473,1252][1109,1400]（636px 两行）完整包在气泡 [414,1207][1168,1445] 内，右缘留白 59px=17vp 精确；5 个 system 项全部渲染为 Clock+文字+"done"胶囊行（胶囊 #FFE4E2DD/149×70px），无裸 type chip；助手 markdown（列表/粗体/行内代码）全部在 85% cap=837px 内
+2026-10-20 第十四轮（设备列表/详情双页重构，响应用户反馈"设备详情页面还是没和安卓对齐"）：
+- **根因**：鸿蒙此前根本没有独立设备详情页——DevicesPage 列表卡片内嵌展开式详情（expandedId），而安卓是列表行点击 → `DeviceDetailScreen` 独立路由（1305 行）。逐行对齐安卓 DevicesScreen/DeviceDetailScreen/DeviceActionsSheet/DeviceConfirmDialog/DeviceDetailControls/DeviceRuntimeState/DeviceAgentPreviewState/SessionMappers 后重写双页：
+- **DevicesPage 重写为纯列表页**（对齐 DevicesScreen.kt）：AddDeviceRow（60vp r15 卡片、42×42 r12 图标盒 + plus + chevron → pairing 路由）+ DeviceRow（60vp 卡片：42×42 图标盒按 deviceOs 取 sys.symbol desktop/computer/pc、名称 17sp 600、在线状态标签 checkmark_circle/circle 16 + 13sp Medium 文案、agent 预览 meta 13sp、chevron_right → device_detail 路由）；排序 online desc → createdAt asc → name asc（sortedForDevicesPage）；在线设备 agent 预览计数 = `listDeviceRuntimes` 中 configured+active+status==running 的数量（onlineAgentCount），Loaded 保留/失败 Unavailable/默认 Loading 三态（DeviceAgentPreviewState），plural one/other 区分；列表 loading 保持 LoadingProgress（鸿蒙无 shimmer 惯例）；onShown + shownOnce 守卫静默刷新
+- **新增 pages/DeviceDetailPage.ets（路由 device_detail，参数 deviceId）**（对齐 DeviceDetailScreen）：自定义 `.title()` 双行头（设备名 25sp/800 + checkmark_circle/circle + 在线状态色标签）+ `.menus()` 38vp 圆钮；底部 actionsSheetOverlay（r28 面板：handle/标题+关闭、Rename 内联 TextInput+错误+SheetTextButton 44dp r22、Revoke 仅在线显示、Delete 危险色）——对齐 DeviceActionsSheet；AgentsSection（加载环/错误+Retry/配置行：pendingRuntimeId spinner 或 8vp 彩点指示器 + 主次标签（runtimeInstanceLabels 逻辑）+ 10 种 RuntimeStatus 全量本地化 + 自定义 32×20 WebRuntimeSwitch + trash + divider + 桌面端配置提示）；SessionsSection（Select/Cancel + Archive all/Unarchive all MiniTextAction、Active/Archived/All 筛选 tag 34dp r17、SessionBulkBar 全选圈+monospace 计数+主操作、52vp 会话行 + relativeTimeLabel 相对时间 now/Xm/Xh/Yest./Xd/Xw/Xy + divider）；四种确认弹窗（删设备/撤销令牌/删 runtime 配置(含运行中变体文案)/归档全部(按 archived+scope 变体)）复用单 CustomDialogController、open 时按 confirmAction 计算 title/message/label；bulkArchiveSelected/unarchive（archiveSessions/unarchiveSessions + notFound 提示 + toast）、requestArchiveAll（scope active/archived/all）、runConfirmAction（删设备→pop 返回列表）
+- **字符串**：三份 string.json 新增 ~64 个 key（devices_add_new/online/offline/agent_status_*、home_tab_active/archived、device_runtime_* 状态标签全套、device_detail_* 区块/批量/toast、device_actions_*、device_confirm_* 四种确认）
+- **移除鸿蒙独有内嵌功能**：列表卡片展开、discover/add-runtime/configure/rename/archive-all 内嵌操作全部移除；安卓 UI 本就无 discover/configure 入口（discoverDeviceRuntimes 与 DeviceRuntimeConfigureSheet 在安卓 UI 无调用点、系死代码），strict 对齐后鸿蒙 UI 不再引用（API 与 RuntimeConfigureSheetOverlay 组件保留未删）
+- **新坑（实测发现）**：`resourceManager.getStringSync(resource)` **不代入 `$r('app.string.x', args)` 的格式化参数**——预览文案渲染出字面 "%d 个 Agent 在线"（Text/promptAction 渲染 Resource 会正常格式化，仅 getStringSync 路径不格式化）。修复：DevicesPage/DeviceDetailPage 各加 `localizedWithCount()`（模板 `replace('%d', count)`），共修 5 处（agents_online one/other、selected_count、sessions_not_found ×2）
+- **图标坑**：`sys.symbol.more` 在鸿蒙是 2×2 四点网格（非安卓 Lucide.Ellipsis 三点省略号），详情页 more 钮改为手绘 Row+3×Circle(4vp, space 3.5) 三点，与安卓视觉一致；`sys.symbol.checkmark_circle` 实测渲染正常（此前未在仓库出现过，风险解除）
+- **记录偏差**：确认弹窗为"确认即关 + 异步执行 + 失败 toast/actionError 横幅"（安卓为弹窗内 busy/inline error + 重试），沿用鸿蒙既有 ConfirmDialog 静态弹窗模式；会话相对时间标签（now/m/h/Yest./d/w/y）与安卓一致硬编码不本地化
+- 模拟器实测（官方云账号）：设备列表（"1 个 Agent 在线" 预览、离线行"离线"、checkmark_circle/circle 渲染）→ 详情页（AGENT 区 DeepSeek Harness 行 + 运行中 + 开关 + trash、桌面提示、会话区筛选 tag、按筛选变化空文案）→ more 三点钮 → actions sheet（重命名/撤销/删除，删除红字）→ Rename 内联（重命名设备标题/输入框/取消保存）→ 撤销确认（%s 设备名格式化正确）→ 删除确认 → 删 runtime 配置确认（active 变体文案正确）逐项通过；未实测（无数据）：会话行渲染/批量选择/批量归档/全部归档确认（当前账号两台设备均无会话）、runtime 开关切换与实际删除（避免改动用户真实数据）
+
+2026-10-20 第十五轮（详情页头部重构 + 会话空数据修复，响应用户反馈"详情页的UI高度太低了，而且活跃会话没有数据"）：
+- **会话空数据根因**：`DEVICE_SESSIONS_LIMIT=200` 超出 Server `/api/v2/sessions` 的 `limit le=100` 校验上限 → 请求返回 422 → catch 静默吞掉 → 活跃会话永远空。修复为 100（与安卓/首页一致，安卓 SessionsController 亦用 limit=100）
+- **头部"太挤/太低"根因**：此前用系统 NavDestination 标题栏（`.title()` 双行自定义 builder + `.menus()`），25sp 标题顶到状态栏下缘（y=137 与安全区零间距）、内容在 56vp 系统标题栏内顶部对齐，视觉拥挤——与安卓结构不同。安卓是**内容区内自绘 64dp DeviceDetailHeader**（ScreenScaffold > Column > Header Row + LazyColumn weight(1f)），标题与在线状态**同行**（weight(1f, fill=false) + spacedBy(9)）、38dp RoundIconAction 圆钮（back/more）、垂直居中
+- **重构**（`DeviceDetailPage.ets`）：`.hideTitleBar(true)` 弃用系统标题栏；新增 `detailHeader()` builder——Row(64vp, padding h24, space 8, 垂直居中)：38vp 圆钮 chevron_left（`navPathStack.pop()`）+ 标题 25sp/800（`flexShrink(1)` 对齐安卓 weight(1f, fill=false) 收缩省略）与状态标签同行 space 9 + 38vp 圆钮手绘三点 more（开 sheet）；build() 结构改为 Stack > Column{ header; Scroll(layoutWeight(1)) } + sheet overlay
+- 模拟器实测：标题块垂直居中（y=197，与状态栏 60px 间距）、标题+状态同行、back 圆钮 pop 返回列表 ✓、more 圆钮（中心约 1130,249）开 sheet（重命名/撤销/删除）✓、活跃会话 8 条渲染（5h 相对时间、divider）✓；未实测：长设备名收缩省略、runtime 开关切换与删除执行（避免改动真实数据）
+
+2026-10-20 第十六轮（会话区按钮全量修复，响应用户反馈"点击已归档页面会下移、选择和全部归档没有效果"）：
+- **下移根因**（官方 FAQ faqs-arkui-725）：`Scroll` 设 `layoutWeight` 后内容短于视口时**内容默认居中**（实测 606/606px 对称留白、AGENT 区下移 173vp），点击"已归档"列表塌缩触发。修复：Scroll 加 `.align(Alignment.Top)`
+- **按钮失效根因**（ArkUI V1 按值传参冻结）：`@Builder` 按值传入的参数在**首次执行时求值后不再响应状态变化**——选择/全部归档按钮的 `enabled` 参数在 sessions 加载完成前（visibleSessions 为空）被求值为 false 冻结，加载完成后按钮仍 opacity 0.45 且 onClick 被 `if (enabled)` 拦截（实测点击无任何效果）；filterTag 的 `selected` 参数同理冻结（切换筛选高亮不动，"全部"点了看不出效果）。修复：把 miniTextAction/filterTag/selectionCircle 三个带状态派生参数的通用 builder 拆为按用途的专用 builder（selectModeButton/archiveAllButton/bulkActionButton/allSelectionCircle/rowSelectionCircle + filterTag(label, filter)），**状态派生值全部改为 builder 体内直接读取**（直接读取是响应式的，仅参数传递会冻结）；传参只留常量（filter 枚举、行 id）
+- 模拟器逐项实测通过：已归档切换（无下移、空文案）✓、全部（合并列表+tag 高亮 #FFECECE9 跟随）✓、活跃 tag 高亮 ✓、选择→批量栏（取消标签/全选圈/已选择 N 个/归档所选）✓、全选→已选择 9 个 ✓、单行点选/取消（圈 #FF181816+勾、计数增减）✓、归档所选→9 条批量归档执行（活跃清空）✓、全部取消归档→确认弹窗（archived scope 文案）→确认执行（已归档清空、9 条恢复活跃，数据已还原）✓、取消退出选择模式 ✓；未实测：长设备名收缩省略、runtime 开关切换与删除执行（避免改动真实数据）
+
+2026-10-21 第十七轮（文件页进入默认态重构，对齐安卓 FilesScreen/DeviceFilesContent）：
+- **差距**：鸿蒙文件页为系统标题栏 + Select 设备下拉 + Home(~)/\/Custom 根路径按钮 + Up/刷新行 + Refresh 下拉刷新 + 带副标题行样式，与安卓结构完全不同（安卓：FilesHeader 64dp 自绘头 + 设备胶囊 44dp r14 + DevicePickerMenu 锚定下拉仅在线设备；PathBar 路径胶囊 + 复制钮；LazyColumn 60dp 行 + ".." 行；无根按钮/Up/刷新/下拉刷新）
+- **FilesPage.ets 整体重写**：`.hideTitleBar(true)` + 自绘 filesHeader（back 40vp 圆钮 + 常显设备触发器 44vp r14：16sp/600 设备名 + chevron_down 19）；锚定设备下拉（ArchivedSessionsPage 同款 getRectangleById + px2vp 模式，宽 min(286, anchor.width)、maxHeight 328、r18、仅在线设备、checkmark 选中、透明遮罩点击关闭，对齐 AADropdownMenu 无阴影无 scrim）；空态分支：无设备→EmptyState(🖥️ + files_pair_first + home_pair_new_device 钮)/加载中→LoadingProgress/全部离线→files_all_devices_offline 居中；browserContent：pathBar（displayedPath 15sp/800（反斜杠→正斜杠显示，对齐安卓 displayRemotePath；空路径显示 files_windows_drives"这台电脑"）+ 复制钮 52×52→check 1100ms）+ List space 1（loading/error/空目录消息行 13sp/600、".." 行、目录/文件行 60vp：40vp 中性色图标盒 + 15sp/600 名称 + 目录 chevron_right + 按压 flash/shadow onTouch）；移除 Select/StringInputDialog/root 按钮/Up/Refresh
+- **进入默认态对齐安卓 initialRemoteFilePath**（响应用户反馈"点击文件应显示所有盘符，而不是用户目录"）：Windows 设备进入路径为 `''`（盘符概览"这台电脑"，connector read_dir 对 win32+path='' 返回 A-Z 存在盘符），非 Windows 为 `'.'`（家目录）；盘符概览无 ".." 行（canGoUp('')=false），点盘符进盘根（路径条显示 `C:/`），盘根 ".." 回概览（isWindowsDriveRootPath→loadDirectory('')），与安卓 remoteParentPath/windowsParentPath(allowDriveOverview) 语义一致；`FileViewSupport` 新增 `isWindowsDeviceOs`/`initialRemoteFilePath`
+- **FilesApi.listFiles path 解析 bug 修复**：`objGetOptString` 把空串当 null（要求 `value.length>0`），connector 盘符概览返回的 `path: ""` 被回退成 root（'~'）→ 路径条误显 `~` 且出现多余 ".." 行；改为 `objGetString(resultRecord, 'path', root)` 保真传递显式空串（其余消费方 SessionAgentFilesPage/NewProjectPage/HomePage 均有 `.length>0` 回退守卫，无回归）
+- **resolvedRoot 语义**：'~' 起步；Windows 加载后取 `windowsDriveRootOf(currentPath)`（概览 path='' 时不覆盖，保持 '~' 兜底，对齐安卓 windowsDriveRoot('')→null→fallback '~'）；非 Windows 首载（root=='~' 且 path 非空）解析为家目录绝对路径，后续 ".." 可越出 home，与安卓一致
+- **图标坑（构建失败）**：`sys.symbol.doc_on_doc` 不存在（restool: Unknown resource name）。合法 symbol 权威清单在 `D:\ProgramFiles\DevEco Studio\sdk\default\openharmony\toolchains\id_defined.json`（record 嵌套数组需展平，`type=='symbol'` 过滤，共 4042 个）。复制图标改用 `doc_text_on_doc_text`
+- StateViews.EmptyState 加可选 `actionSymbol` 参数（默认 sys.symbol.plus，不破坏现有调用）；三份 string.json 补 `devices_no_online`（No online devices/暂无在线设备）
+- 模拟器实测：进入默认态（自绘头 + 设备胶囊"工作笔记本" + PathBar"这台电脑" + C:/D:/E: 盘符行，**无 ".." 行**——Windows 盘符概览）✓；点 C: → `C:/` 盘根列表 ✓；盘根 ".." → 返回盘符概览 ✓；设备下拉打开（胶囊下方左对齐、单在线设备 + checkmark）→ 点击外部关闭 ✓；点 .claude → 路径/列表更新 ✓；".." 返回上级 ✓；头部 back 圆钮 pop 回首页 ✓
+- 未实测：复制按钮 check 切换（模式与详情页复制钮一致，低风险）、长按菜单（FileRowMenuOverlay 本轮保留原样）、非 Windows 设备进入态（当前账号仅 Windows 设备在线；代码路径与安卓一致：initialRemoteFilePath→'.'）
+
+2026-10-21 第十八轮（首页 Agent 门控空态，响应用户反馈"没有连接 agent 时，首页进来还是显示了数据"，**产品决策：有意偏离安卓**）：
+- **决策**：用户经确认选择"0 agent 在线显示引导空态"——设备在线但无 Agent 运行时（或全部设备离线）时，首页列表区显示设置引导而非服务端会话树。**安卓行为不同**：HomeProjectModeList（HomeScreen.kt:595）仅在 `devices.isEmpty()` 时显示配对空态，会话树不因 Agent 离线而隐藏；本改动为鸿蒙侧产品决策，**安卓待同步**（跨端差异需产品侧确认后跟进）
+- **实现**（`HomePage.ets`）：新增 `@State agentGateState`（checking/ready/no_devices/devices_offline/no_agents）+ `loadAgentGate()`（listDevices → 全离线 → `devices_offline`；在线设备逐个 `listDeviceRuntimes`，`runnableRuntimes`（configured+active+running）计数 0 → `no_agents`；否则 `ready`；seq 防竞态、失败 fail-open 成 `ready` 不阻塞首页）；列表区分支链插入门控分支（loading → error → **gate** → pairPrompt → treeEmpty → tree），checking 期间并入 loading spinner（首进不闪会话树）；`agentGateContent()` builder：🤖/🔌 + 标题 + 描述（复用 new_session_setup_agent / new_session_devices_offline 字符串，**无操作按钮**——用户决策"重新检查按钮没有必要"，刷新依赖下拉刷新/重进/快照联动），头部/QuickEntries/FAB 保留
+- **刷新联动**（响应用户反馈"配置了 agent 后页面无法刷新"：门控空态原无任何刷新手段——无按钮、Refresh 只包项目树分支）：aboutToAppear/retryInitialLoad/Refresh.onRefreshing 均重查门控；**门控空态分支本身包进 Refresh**（与 tree 分支同款 `$$this.refreshing` + onRefreshing，下拉即可重查 gate 并在 agent 恢复后切回项目树）；dashboard 快照在**在线设备 id 集合变化**时自动重查（连接器上线/掉线即时响应；Agent runtime 启停不触发快照设备变化，需下拉刷新）
+- 遗留规则：`.alignSelf()` 参数是 `ItemAlign` 非 `HorizontalAlign`（build 报错实测）
+- 模拟器实测（官方云账号，工作笔记本在线 0 Agent）：首页显示 🤖 + "先配置一个 Agent" + 描述（无项目树/会话数据泄漏，**无重新检查按钮**）✓；头部/三卡/FAB 保留 ✓；FAB → 新建会话面板（内嵌同款引导）开/✕ 关 ✓；设备快捷入口正常跳转 ✓；后台/前台往返门控保持 ✓；**门控空态下拉刷新实测**（用户配置 agent 期间）：下拉触发 onRefreshing → gate 重查（截图捕获"空态+Refresh 指示器"同屏）→ agent 恢复后经快照联动/下拉刷新切回项目树 ✓
+- 未实测：`devices_offline` 分支渲染（需将在线设备下线，代码路径与 no_agents 同构）、Agent 恢复在线后树恢复（需真实启动 Agent runtime）；**安卓侧待产品确认后同步**
+
+2026-10-21 第十九轮（FAB 新建会话面板"选项卡无法操作"修复，响应用户反馈）：
+- **症状**：新建会话面板中模型/推理/权限 chips 点击后选中态毫无变化（截图字节级相同），用户感知"无法操作"；设备/Agent chips 正常
+- **修复 A（重新检查永久卡死）**：`loadNewSessionDevices()`（onRetrySetup 回调）设 `setupState='checking'` 后调 `autoSelectDevice()`，其守卫 `selectedDeviceId.length > 0` 直接 return → 无人把状态从 checking 转出 → 永久卡"正在检查设备"。修复：retry 入口先清空 selectedDeviceId/selectedRuntimeType/selectedRuntimeId/runtimes、runtimesLoading=false、`newSessionRuntimeRequestSeq++`（防在途 catalog 请求回写）。实测：点离线设备 → no_runtimes 引导 → 点"重新检查" → 5 秒内回 ready 设备列表
+- **修复 B（模型行点击无效，@Builder 按值参数冻结）**：UI debug 埋点（界面 debug Text，已验证的排查手段——JS hilog 不进捕获缓冲）实测 trace `T[ok:...]M[新模型]` 证明点击链路全通、`newSessionSelectedModelId` 已更新、@Prop catalog 同步正常，但 chips 不重渲染。根因：`optionRow(options, onSelected)` 为**按值传参的 @Builder**，其内部 ForEach 数据源被冻结在首次执行的旧数组——选中态变化后 ForEach 永不 re-diff，chips 视觉死寂。修复：删除 optionRow 中间层，Flex+ForEach 直接内联进 catalogSection（param-less @Builder 读 `this.catalog`，随 @Prop 同步 re-render；key `${id}:${selected}` 变化触发 item 重建），模型/推理/权限三行同修
+- 沉淀规则（升级既有冻结规则）：**按值 @Builder 参数冻结不只影响"状态派生值"——数组型参数会连带冻结 ForEach 数据源**；含 ForEach 的行渲染必须内联到读取 @Prop/@State 的 param-less builder 中，禁止"传数组进子 @Builder"的中间层模式
+- 模拟器实测（官方云账号，DSH runtime 全模型目录）：Gemma 3 4B IT 点击 → 黑底选中 + Gemma 3 12B IT 变灰 ✓；再点 Kimi K3 → 选中转移 ✓（其间误点 Muse Glimmer 30B 亦正确切换并验证多次切换稳定）；"重新检查"修复复验 ✓；关闭面板无副作用 ✓
+- 未实测：推理 effort 行与权限行点击（修复模式与模型行同构，当前账号模型无 reasoningItems）；Android 侧对应行为为标准 Compose 状态渲染，无此坑
+
+2026-10-21 第二十轮（新建会话目录浏览器从盘符起步 + 两处文件视图隐藏项过滤，响应用户反馈）：
+- **需求**：① FAB 新建会话"选择目录"浏览器在 Windows 设备上应从盘符概览起步（原固定 root '~' + path '.' 家目录起步，看不到盘符）；② 浏览器与首页文件页均不显示隐藏文件夹（用户产品决策）
+- **隐藏过滤为鸿蒙侧首创**（`FileViewSupport.isHiddenFileEntryName`）：connector `read_dir` 返回全部条目（payload 无 hidden 标志），Android/web/desktop 均无隐藏过滤先例。规则：`.` 前缀全平台恒隐藏；`$` 前缀与 Windows 黑名单（appdata/system volume information/pagefile.sys/desktop.ini/recovery 等 22 项小写匹配）仅 Windows 设备生效（避免误伤 mac/linux 合法目录如 recovery/recent/templates）
+- **浏览器 Windows 起步**（`HomePage.ets`）：`newSessionBrowserRoot` 字段 + OS 感知起始路径（`initialRemoteFilePath(deviceOs)`：Windows→'' 盘符概览，其他→'.' 家目录）；`loadNewSessionBrowserDirectory` 对齐 FilesPage 第十七轮语义（drive-style path 补 `\\` + `windowsDriveRootOf` 作 requestRoot，成功后回写 root）；`goNewSessionBrowserUp` 加 Windows 分支（drive root→`load('')` 回概览、drive-style→`windowsParentPath`）；canGoUp 对 drive-style 恒 true、空路径恒 false；retry 改重载 `lastRequestPath`（新字段，请求时记录——概览重试不再错去家目录）；resetNewSessionBrowserState 重置 root/lastRequestPath
+- **浏览器 UI**（`NewSessionSheetOverlay.ets`）：空路径标题显示"这台电脑"（复用 files_windows_drives）；"使用此目录"按钮 enabled 加 `path.length > 0`（盘符概览可浏览不可选用，现有 useDirectory 空路径守卫的 UI 侧补全）；路径 Text 三元混用 string/Resource 编译通过
+- **文件页过滤**（`FilesPage.ets`）：`filterHiddenEntries` + `selectedDeviceIsWindows`（遍历 devices 匹配 deviceId），`loadDirectory` 改 `sortEntries(filterHiddenEntries(...))`
+- 浏览器列表 List 懒加载：dump 只含可视区条目（220 高度约束约 3 行），与文件页数据源一致性需按排序前缀比对（a1cc/acc8/inetpub/PerfLogs/... 顺序两处一致）
+- 模拟器实测（官方云账号，工作笔记本在线）：FAB → 选择目录 → "这台电脑"+C:/D:/E: ✓；概览态"向上"禁用 ✓、"使用此目录"禁用 ✓；进 C:\ 路径显示 `C:\`、无隐藏项 ✓；C:\ 下"使用此目录"启用 → 点击 cwd 写入 `C:\` 且浏览器关闭 ✓；"向上"C:\→盘符概览 ✓；文件页 C:\ 完整列表无 $RECYCLE.BIN/System Volume Information（connector 端无过滤 → 客户端过滤实证生效）、PerfLogs/Program Files/Users 等正常目录无误伤 ✓
+- 未实测：D:/E: 盘内容、非 Windows 设备浏览器起步（当前账号仅 Windows 设备在线，代码路径 '.' 与原行为一致）、Windows 黑名单逐项（实测环境仅触发 $RECYCLE.BIN/System Volume Information 缺席这一强证据）；**Android 侧隐藏过滤待产品确认后同步**
+
+2026-10-21 第二十一轮（会话时间线工具行重设计，对齐 web 端手机版 session-detail）：
+- **基准**：`web-next/src/components/session-detail.tsx`（groupTimelineItems/ToolRunGroup/运行指示）+ `session/session-tool-cards.tsx`（timelineToolTitle/ToolDetailPanel/CodePanel）+ `messages/en.json`/`zh-CN.json` 工具文案模板；鸿蒙侧数据层扩展 `RemoteTimelineItem` 9 字段（command/output/toolName/targetPath/query/description/action/changes 等，均 `string|null` 或 `RemoteTimelineFileChange[]`）+ 解析助手
+- **弱化单行 + 人性化摘要**（`common/TimelineSummaries.ets` 纯函数层）：timelineToolRowTitle 按 kind 套模板（command→"执行了 %1$s"、file_change/artifact→"创建了/修改了 文件名"、web_search→"搜索了 %1$s"、reasoning→"推理"），output 在有 changes 时折叠（对齐 web ToolCard displayOutput）；fileChangeActionOf 归一 created/deleted/renamed/modified/changed；displayPathFor 剥 cwd 前缀；组件层 `TimelineToolEntry.ets`（Row：hasDetail 才显 chevron 旋转 -90/0、kind 图标映射 keyboard/doc_text/magnifyingglass/lightbulb/gearshape、failed 红字 + exclamationmark_circle、running LoadingProgress(12)）+ `TimelineToolPanel.ets`（命令/输出双面板 canvas 底 r12、复制钮 pasteboard+toast、输出 Scroll maxHeight 260、diff Scroll maxHeight 300 复用 DiffCodeView、fileChangeRow 行内 builder）
+- **连续归组**（`TimelineToolGroupEntry.ets` + SessionDetailPage rebuildEntries）：连续 toolRun ≥2 归组，组行 line_3_horizontal 图标 + 摘要（"推理了 N 次, 执行了 M 次工具"）+ running spinner，点击原地展开成员 ForEach→TimelineToolEntry（key=member.rowKey）；SessionSection 架构（kind/entry/entryKey/toolRow/group 三分支渲染）替换原 entries 数组；组 key 不含 revision（成员 revision 变化仅重建行、组壳稳定）
+- **配套**：notices 从 List 移到 composer 上方钉住（首条全卡 + "还有 N 个待处理通知" pill）；建议浮层与附件面板补 `.shadow()`；interrupt 按钮 borderRadius 17→12（红色圆角方块）；canInterrupt 时列表底部"正在运行…"行；三份 string.json 补 23 个 session_tool_* key（中英双语，手动 `.replace('%1$s', x)` 格式代入）
+- **新坑（实测发现）**：`Text.copyOption(CopyOptions.LocalDevice)` 会**吞掉点击事件**——父级 Row 的 onClick 在点击文本区域时不触发（点 chevron/图标正常，点标题文字无效，dump 无变化无报错）。TimelineToolEntry 标题移除 copyOption 后整行可点（展开面板内保留复制按钮兜底）；沉淀规则：**可点击行内的 Text 禁用 copyOption**
+- **消息宽度修复（响应用户反馈"右边没有对好，有一块留白"）**：第十三轮引入的 `assistantBubbleMaxVp = rowContentVp * 0.85` 是鸿蒙侧臆造上限——安卓 AgentMarkdownText 是 `fillMaxWidth` 无分数上限，实测助手内容右缘被钳在 935px（列表内容右缘 1210px），右侧留出 ~275px 空白块。修复：宽度基准改为 `listContentVp = winVp - 40`（仅列表 20vp×2 padding，对齐安卓 LazyColumn horizontal=20dp），助手气泡上限 = 全列表内容宽（安卓 fillMaxWidth 语义），用户气泡 = 78%×listContentVp（安卓 BoxWithConstraints maxWidth×0.78f 语义）；消息行移除额外 left 12/right 32 行内边距（安卓行无额外水平 padding）。实测：助手内容 [84..1194]（原 [126..935]）、用户气泡右缘 1210px = 列表内容右缘（原 1168），与安卓一致
+- 模拟器实测（官方云账号，历史 DSH 会话，设备离线）：组摘要行（"推理了 2 次, 执行了 3 次工具"）✓、无 type 徽章 ✓、组点击原地展开成员弱行 ✓、工具行点击标题文字原地展开 TimelineToolPanel（命令/输出面板 + 复制钮 + "已复制" toast）✓、reasoning 行展开全文 ✓、附件面板浮层（多模态确认：白色圆角卡片 + 轻微阴影覆盖内容之上）✓
+- 未实测（需活跃运行/待审批数据，当前设备离线）：running spinner、"正在运行…"行、审批 notice 钉 composer、建议浮层（takeover 确认框拦截输入未触发）、红色圆角方块停止按钮（需 canInterrupt）；以上均为代码完成 + 构建验证状态
 
 ---
+
 
 ## 一、已对齐（DONE）
 
@@ -60,9 +154,11 @@
 - **后台保活**：`backgroundTaskManager.startBackgroundRunning(BackgroundMode.DATA_TRANSFER)` + `KEEP_BACKGROUND_RUNNING` 权限 + `backgroundModes: ["dataTransfer"]`，失败静默降级（批次 T3）
 
 ### 设备 / 配对
-- 设备 CRUD（列表/重命名/删除/revoke）
+- **设备列表页（第十四轮重构，对齐 DevicesScreen）**：AddDeviceRow（→ pairing）+ DeviceRow（图标按 deviceOs desktop/computer/pc、在线状态标签、在线 agent 预览计数、chevron → device_detail 路由）；排序 online desc→createdAt asc→name asc；下拉刷新 + onShown 静默刷新
+- **设备详情页（第十四轮新增、第十五轮头部重构 `pages/DeviceDetailPage.ets`，对齐 DeviceDetailScreen）**：内容区自绘 64vp DeviceDetailHeader（38vp 圆钮 back/more、标题 25sp/800 flexShrink 收缩 + 在线状态同行，`.hideTitleBar(true)`）→ actions sheet（Rename 内联/Revoke 仅在线/Delete 危险色）；AGENT 区（加载/错误重试/10 种 RuntimeStatus 全量本地化/32×20 开关/删除配置确认含 active 变体）；SESSIONS 区（Select/Archive all、Active/Archived/All 筛选、批量栏、相对时间会话行、bulk 归档/取消归档 + notFound 提示、按 scope 全部归档/取消归档确认，limit=100 对齐安卓）；删设备/撤销令牌确认
+- 设备 CRUD API（列表/重命名/删除/revoke）
 - 完整配对流程：create + token 展示 + pair-code claim + 上线轮询（`feature/DevicePairingFlow.ets`、`pages/DevicePairingPage.ets`）
-- **runtime 配置**：`POST /connectors/{id}/runtimes/discover`、`PUT .../runtimes/{rid}/config`、`PUT .../active`、`DELETE .../config` 四端点 + 配置底部弹层（schema 动态表单：executablePath 文本、environment 变量编辑器、uiSchema.order 排序，批次 T4，`components/RuntimeConfigureSheetOverlay.ets`）
+- **runtime 配置 API**：`POST /connectors/{id}/runtimes/discover`、`PUT .../runtimes/{rid}/config`、`PUT .../active`、`DELETE .../config` 四端点 + 配置底部弹层组件保留（`components/RuntimeConfigureSheetOverlay.ets`）；第十四轮 strict 对齐后 UI 不再引用 discover/configure 入口（安卓 UI 亦无此入口，系鸿蒙独有遗留能力，API 保留备用）
 - runtime 设激活/停用、删除（含运行中危险确认文案区分）
 
 ### 文件 / 附件
@@ -83,17 +179,19 @@
 - **Setup 引导面板**：checking/devices-unavailable/no-devices/connect-device/offline/agents-unavailable/setup-agent/no-runtimes 全状态机（对齐安卓 NewSessionSetupPanel），检查重试 + "去设备页"
 - 可编辑标题 + 保留鸿蒙独有的首条消息/附件能力；全量 i18n + 主题化（消除硬编码颜色/英文）
 
-### 文件页（B1 对齐安卓 FilesScreen/DeviceFilesContent）
-- 路径条复制按钮（Copy/Check 切换）、长按文件/目录 → 菜单复制路径（`components/FileRowMenuOverlay.ets`）
+### 文件页（B1 + 第十七轮重构，对齐安卓 FilesScreen/DeviceFilesContent）
+- **布局结构（第十七轮）**：自绘 filesHeader（back 40vp 圆钮 + 设备胶囊 44vp r14 + chevron_down）；锚定设备下拉（仅在线设备、checkmark 选中、点击外部关闭）；PathBar（路径胶囊 15sp/800 + 52×52 复制钮 Copy/Check 1100ms 切换）；列表 60vp 行（40vp 中性色图标盒 + 15sp/600 名称 + 目录 chevron_right + 按压 flash/shadow）；".." 行上级导航；空态三分支（未配对 EmptyState + 配对按钮 / 加载中 / 全部离线）
+- **resolvedRoot / 初始路径语义（第十七轮）**：进入路径对齐安卓 `initialRemoteFilePath`——Windows 设备 `''`（盘符概览"这台电脑"，无 ".." 行），非 Windows `'.'`（家目录）；'~' 起步，Windows 加载后取盘符根、非 Windows 首载解析为家目录绝对路径，后续 ".." 可越出 home，与安卓 RemoteFileNavigation 一致；路径显示反斜杠→正斜杠（对齐 displayRemotePath）
+- 长按文件/目录 → 菜单复制路径（`components/FileRowMenuOverlay.ets`）
 - 文件预览：文件内搜索（大小写不敏感、↑↓ 导航、当前/总数计数、行高亮定位）+ 复制内容
 - Windows 盘符概览（`''` 路径 = "这台电脑"，`common/FileViewSupport.ets` 盘符/上级目录工具）
-- 空态引导：未配对设备 → "先配对" + 跳转设备页；全部离线 → files_all_devices_offline
-- 语义文件图标（文件夹/代码/文本/普通，替换 emoji）；会话 agent 文件页同步以上能力
-- 保留鸿蒙领先项：根路径显式切换、下拉刷新、25MB 保存到本机
+- 语义文件图标（文件夹/代码/文本/普通）；会话 agent 文件页同步以上能力
+- 保留鸿蒙领先项：25MB 保存到本机
 
 ### 会话详情（B2 对齐）
 - **takeover 确认弹窗**：开关/关闭均弹确认（对齐安卓 session_enable/disable_takeover 文案，DSH 专属正文），确认才调 API，失败回弹，busy 防重入
 - **附件全屏预览**：`components/AttachmentPreviewOverlay.ets`（Swiper 翻页 + 底部缩略图条 + 双指缩放 1–4x + LoadingProgress 占位 + 失败文件名 fallback + 远程附件下载/保存）；`loadAttachmentPixelMap` 缓存与并发去重（`AttachmentImageView.ets` 抽出共用）
+- **消息气泡格式对齐**：用户气泡 sessionMessageBubble 色（非 primaryAction 反色）+ 浅纸底文字色；助手裸 markdown（无卡片包装）；消息间距 16vp + 水平 padding 20vp；Notice 卡片按 error/warning/success 严重级别着色（第九轮）
 
 ### 终端
 - **清屏按钮**：状态行垃圾桶按钮，本地清屏（清屏幕+scrollback+光标归零，`TerminalEmulator.clearScreen()`；安卓为重启 shell，语义差异见下）
@@ -123,7 +221,7 @@
 | 终端备用屏幕缓冲区 | CSI ?1049 完整支持 | 私有序列安全吞掉，不污染 scrollback，但全屏应用仍画主屏 | 已知偏差 |
 | 终端清屏语义 | 清屏按钮实为重启 shell | 本地清屏（保留 shell 连接） | B1 采用本地清屏，语义更温和；如需对齐安卓改重启 |
 | 终端多实例池 | `RemoteTerminalPool` 多页共享 | 每页单实例 | 鸿蒙页面栈结构不同，影响有限 |
-| runtime 状态枚举文案 | Server 10 种 `RuntimeStatus` 本地化 | 仅 active/present/absent 三态徽章，状态码原样显示 | T4 未尽事项 |
+| 确认弹窗内联错误 | 弹窗内 busy/inline error + 重试 | 确认即关 + 异步执行 + 失败 toast + actionError 横幅 | 第十四轮记录偏差，沿用鸿蒙静态 ConfirmDialog 模式 |
 | 发送中按钮状态跨页恢复 | `sending = hasPendingOptimisticSend()` | 仅恢复消息气泡，按钮不跨页（旧实例 Promise 无法通知新实例） | T8 未尽事项 |
 | 发送失败草稿跨页 | 失败草稿持久化 | 离页后失败草稿丢失 | T8 未尽事项 |
 | notice 草稿/状态机 | `RuntimeNoticeDraftStore` + 状态合并 | `respondingNoticeId` 单条锁，无草稿 | 现有实现可用，缺草稿续填 |

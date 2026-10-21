@@ -1,13 +1,16 @@
 import { ApiClient } from '../api/ApiClient';
-import { DevicesApi, RemoteDevice, RemoteDeviceRuntime } from '../api/DevicesApi';
-import { SessionsApi } from '../api/SessionsApi';
+import { DevicesApi, RemoteDevice } from '../api/DevicesApi';
 import { SharedApiClient } from '../api/SharedApiClient';
 import { AuthSessionStore } from '../auth/AuthSessionStore';
 import { errorMessageFrom } from '../common/ApiException';
 import { APP_IS_DARK_KEY, getColors } from '../designsystem/ColorTokens';
-import { ConfirmDialog } from '../components/ConfirmDialog';
-import { RuntimeConfigureSheetOverlay } from '../components/RuntimeConfigureSheetOverlay';
-import { showToast } from '../utils/Toast';
+
+// Online-agent preview for a device row, mirrors android
+// DeviceAgentPreviewState: count >= 0 loaded, -1 unavailable.
+interface DevicePreviewEntry {
+  deviceId: string;
+  count: number;
+}
 
 @Component
 export struct DevicesPage {
@@ -16,95 +19,13 @@ export struct DevicesPage {
   @State refreshing: boolean = false;
   @State errorMessage: string = '';
   @State devices: RemoteDevice[] = [];
-  @State expandedId: string = '';
-  @State runtimesLoading: boolean = false;
-  @State runtimes: RemoteDeviceRuntime[] = [];
-  @State runtimesError: string = '';
-  @State renameTargetId: string = '';
-  @State renameInput: string = '';
-  @State busy: boolean = false;
-  // Runtime management (discover / configure / activate / delete), mirrors
-  // android DeviceRuntimeManagementState's pendingRuntimeId + discovering.
-  @State runtimeBusyId: string = '';
-  @State discovering: boolean = false;
-  @State configureTarget: RemoteDeviceRuntime | null = null;
-  @State configureSaving: boolean = false;
-  @State configureError: string = '';
+  @State previewEntries: DevicePreviewEntry[] = [];
   private navPathStack: NavPathStack = new NavPathStack();
-  private runtimesRequestSeq: number = 0;
   private authStore: AuthSessionStore = AuthSessionStore.getInstance();
   private client: ApiClient = SharedApiClient.getInstance();
   private devicesApi: DevicesApi = new DevicesApi(this.client);
-  private sessionsApi: SessionsApi = new SessionsApi(this.client);
-  private pendingDeleteDevice: RemoteDevice | null = null;
-  private confirmDeleteDialog: CustomDialogController = new CustomDialogController({
-    builder: ConfirmDialog({
-      title: $r('app.string.devices_delete_title'),
-      message: `Delete "${this.pendingDeleteDevice?.name ?? ''}"? Its connector token will stop working.`,
-      confirmText: $r('app.string.devices_delete_confirm'),
-      cancelText: $r('app.string.devices_delete_cancel'),
-      confirmIsDanger: true,
-      onConfirm: (): void => {
-        if (this.pendingDeleteDevice !== null) {
-          this.deleteDevice(this.pendingDeleteDevice.id);
-        }
-        this.confirmDeleteDialog.close();
-      },
-      onCancel: (): void => {
-        this.confirmDeleteDialog.close();
-      }
-    }),
-    autoCancel: true,
-    alignment: DialogAlignment.Center
-  });
-  // "Archive all sessions" confirmation: which device is about to have all of
-  // its sessions archived (scope "all", mirrors Android DeviceDetailScreen).
-  private pendingArchiveDevice: RemoteDevice | null = null;
-  private confirmArchiveAllDialog: CustomDialogController = new CustomDialogController({
-    builder: ConfirmDialog({
-      title: $r('app.string.devices_archive_all_title'),
-      message: $r('app.string.devices_archive_all_body', this.pendingArchiveDevice?.name ?? ''),
-      confirmText: $r('app.string.devices_archive_all_confirm'),
-      cancelText: $r('app.string.devices_delete_cancel'),
-      confirmIsDanger: false,
-      onConfirm: (): void => {
-        if (this.pendingArchiveDevice !== null) {
-          this.archiveAllDeviceSessions(this.pendingArchiveDevice);
-        }
-        this.confirmArchiveAllDialog.close();
-      },
-      onCancel: (): void => {
-        this.confirmArchiveAllDialog.close();
-      }
-    }),
-    autoCancel: true,
-    alignment: DialogAlignment.Center
-  });
-  // "Delete runtime configuration" confirmation: which configured runtime is
-  // about to be removed (scope mirrors Android DeviceConfirmAction.DeleteRuntimeConfig).
-  private pendingDeleteRuntime: RemoteDeviceRuntime | null = null;
-  private confirmDeleteRuntimeDialog: CustomDialogController = new CustomDialogController({
-    builder: ConfirmDialog({
-      title: $r('app.string.devices_runtime_delete_title', this.pendingDeleteRuntime?.displayName ?? ''),
-      message: this.pendingDeleteRuntime !== null && this.pendingDeleteRuntime.active
-        ? $r('app.string.devices_runtime_delete_active_body', this.pendingDeleteRuntime?.displayName ?? '')
-        : $r('app.string.devices_runtime_delete_body', this.pendingDeleteRuntime?.displayName ?? ''),
-      confirmText: $r('app.string.devices_runtime_delete_confirm'),
-      cancelText: $r('app.string.devices_delete_cancel'),
-      confirmIsDanger: true,
-      onConfirm: (): void => {
-        if (this.pendingDeleteRuntime !== null) {
-          this.deleteRuntime(this.pendingDeleteRuntime);
-        }
-        this.confirmDeleteRuntimeDialog.close();
-      },
-      onCancel: (): void => {
-        this.confirmDeleteRuntimeDialog.close();
-      }
-    }),
-    autoCancel: true,
-    alignment: DialogAlignment.Center
-  });
+  private previewsRequestSeq: number = 0;
+  private shownOnce: boolean = false;
 
   private serverUrl(): string {
     return this.authStore.readServerUrl();
@@ -112,6 +33,131 @@ export struct DevicesPage {
 
   private token(): string {
     return this.authStore.readAccessToken();
+  }
+
+  private localized(resource: Resource): string {
+    return getContext(this).resourceManager.getStringSync(resource);
+  }
+
+  // getStringSync does not substitute $r format params, so replace the
+  // "%d" placeholder manually.
+  private localizedWithCount(resource: Resource, count: number): string {
+    return this.localized(resource).replace('%d', count.toString());
+  }
+
+  // Mirrors android sortedForDevicesPage: online first, then createdAt
+  // ascending, then name ascending.
+  private sortedDevices(): RemoteDevice[] {
+    const sorted = this.devices.slice();
+    sorted.sort((left: RemoteDevice, right: RemoteDevice): number => {
+      const leftOnline = left.status === 'online' ? 1 : 0;
+      const rightOnline = right.status === 'online' ? 1 : 0;
+      if (leftOnline !== rightOnline) {
+        return rightOnline - leftOnline;
+      }
+      const leftCreated = left.createdAt ?? '';
+      const rightCreated = right.createdAt ?? '';
+      if (leftCreated !== rightCreated) {
+        return leftCreated < rightCreated ? -1 : 1;
+      }
+      const leftName = left.name.toLowerCase();
+      const rightName = right.name.toLowerCase();
+      if (leftName !== rightName) {
+        return leftName < rightName ? -1 : 1;
+      }
+      return 0;
+    });
+    return sorted;
+  }
+
+  // Mirrors android onlineAgentCount: configured + active + running.
+  private onlineAgentCount(deviceId: string, seq: number): void {
+    this.devicesApi.listDeviceRuntimes(this.serverUrl(), this.token(), deviceId)
+      .then((list) => {
+        let count = 0;
+        for (const runtime of list.runtimes) {
+          if (runtime.configured && runtime.active && runtime.status === 'running') {
+            count++;
+          }
+        }
+        this.setPreviewEntry(deviceId, count, seq);
+      })
+      .catch(() => {
+        this.setPreviewEntry(deviceId, -1, seq);
+      });
+  }
+
+  private setPreviewEntry(deviceId: string, count: number, seq: number): void {
+    if (this.previewsRequestSeq !== seq) {
+      return;
+    }
+    const next: DevicePreviewEntry[] = [];
+    let replaced = false;
+    for (const entry of this.previewEntries) {
+      if (entry.deviceId === deviceId) {
+        const updated: DevicePreviewEntry = { deviceId: deviceId, count: count };
+        next.push(updated);
+        replaced = true;
+      } else {
+        next.push(entry);
+      }
+    }
+    if (!replaced) {
+      const created: DevicePreviewEntry = { deviceId: deviceId, count: count };
+      next.push(created);
+    }
+    this.previewEntries = next;
+  }
+
+  // Mirrors android DeviceAgentPreviews.beginRefresh: keep loaded counts for
+  // devices that are still online, reset everything else to loading.
+  private refreshPreviews(): void {
+    this.previewsRequestSeq++;
+    const seq = this.previewsRequestSeq;
+    const kept: DevicePreviewEntry[] = [];
+    for (const device of this.devices) {
+      if (device.status !== 'online') {
+        continue;
+      }
+      for (const entry of this.previewEntries) {
+        if (entry.deviceId === device.id && entry.count >= 0) {
+          kept.push(entry);
+        }
+      }
+    }
+    this.previewEntries = kept;
+    for (const device of this.devices) {
+      if (device.status === 'online') {
+        this.onlineAgentCount(device.id, seq);
+      }
+    }
+  }
+
+  private previewCountFor(deviceId: string): number {
+    for (const entry of this.previewEntries) {
+      if (entry.deviceId === deviceId) {
+        return entry.count;
+      }
+    }
+    return -2;
+  }
+
+  // Mirrors android deviceAgentPreviewLabel.
+  private previewLabel(device: RemoteDevice): string {
+    if (device.status !== 'online') {
+      return this.localized($r('app.string.devices_offline'));
+    }
+    const count = this.previewCountFor(device.id);
+    if (count >= 0) {
+      if (count === 1) {
+        return this.localizedWithCount($r('app.string.devices_agents_online_one'), count);
+      }
+      return this.localizedWithCount($r('app.string.devices_agents_online_other'), count);
+    }
+    if (count === -1) {
+      return this.localized($r('app.string.devices_agent_status_unavailable'));
+    }
+    return this.localized($r('app.string.devices_agent_status_loading'));
   }
 
   private async loadDevices(): Promise<void> {
@@ -123,386 +169,188 @@ export struct DevicesPage {
     }
     this.loading = false;
     this.refreshing = false;
-  }
-
-  private async toggleExpanded(deviceId: string): Promise<void> {
-    this.runtimesRequestSeq++;
-    if (this.expandedId === deviceId) {
-      this.expandedId = '';
-      this.runtimes = [];
-      this.runtimesError = '';
-      this.runtimesLoading = false;
-      return;
-    }
-    this.expandedId = deviceId;
-    this.renameTargetId = '';
-    this.runtimes = [];
-    this.runtimesError = '';
-    this.runtimesLoading = true;
-    const requestSeq = this.runtimesRequestSeq;
-    try {
-      const list = await this.devicesApi.listDeviceRuntimes(this.serverUrl(), this.token(), deviceId);
-      if (this.runtimesRequestSeq !== requestSeq) {
-        return;
-      }
-      this.runtimes = list.runtimes;
-      this.runtimesLoading = false;
-    } catch (error) {
-      if (this.runtimesRequestSeq !== requestSeq) {
-        return;
-      }
-      this.runtimesError = errorMessageFrom(error as Object);
-      this.runtimesLoading = false;
-    }
-  }
-
-  private beginRename(device: RemoteDevice): void {
-    this.renameTargetId = device.id;
-    this.renameInput = device.name;
-  }
-
-  private async confirmRename(): Promise<void> {
-    const deviceId = this.renameTargetId;
-    const name = this.renameInput.trim();
-    if (deviceId.length === 0 || name.length === 0) {
-      return;
-    }
-    this.busy = true;
-    try {
-      const updated = await this.devicesApi.updateDevice(this.serverUrl(), this.token(), deviceId, name);
-      const next: RemoteDevice[] = [];
-      for (const device of this.devices) {
-        if (device.id === deviceId) {
-          next.push(updated);
-        } else {
-          next.push(device);
-        }
-      }
-      this.devices = next;
-      this.renameTargetId = '';
-      this.errorMessage = '';
-    } catch (error) {
-      this.errorMessage = errorMessageFrom(error as Object);
-    }
-    this.busy = false;
-  }
-
-  private cancelRename(): void {
-    this.renameTargetId = '';
-    this.renameInput = '';
-  }
-
-  private requestDelete(device: RemoteDevice): void {
-    this.pendingDeleteDevice = device;
-    this.confirmDeleteDialog.open();
-  }
-
-  private async deleteDevice(deviceId: string): Promise<void> {
-    this.busy = true;
-    try {
-      await this.devicesApi.deleteDevice(this.serverUrl(), this.token(), deviceId);
-      const next: RemoteDevice[] = [];
-      for (const device of this.devices) {
-        if (device.id !== deviceId) {
-          next.push(device);
-        }
-      }
-      this.devices = next;
-      if (this.expandedId === deviceId) {
-        this.expandedId = '';
-        this.runtimes = [];
-      }
-      this.errorMessage = '';
-    } catch (error) {
-      this.errorMessage = errorMessageFrom(error as Object);
-    }
-    this.busy = false;
-  }
-
-  // --- Archive all sessions on a device ------------------------------------
-
-  private requestArchiveAll(device: RemoteDevice): void {
-    this.pendingArchiveDevice = device;
-    this.confirmArchiveAllDialog.open();
-  }
-
-  private async archiveAllDeviceSessions(device: RemoteDevice): Promise<void> {
-    this.busy = true;
-    try {
-      const sessions = await this.sessionsApi.archiveAllDeviceSessions(this.serverUrl(), this.token(),
-        device.id, true, 'all');
-      this.errorMessage = '';
-      showToast($r('app.string.devices_archive_all_toast', sessions.length));
-    } catch (error) {
-      this.errorMessage = errorMessageFrom(error as Object);
-      showToast($r('app.string.devices_archive_all_failed'));
-    }
-    this.pendingArchiveDevice = null;
-    this.busy = false;
-  }
-
-  // --- Runtime management: discover / activate / configure / delete ---------
-
-  private async reloadRuntimes(deviceId: string): Promise<void> {
-    if (this.expandedId !== deviceId) {
-      return;
-    }
-    this.runtimesRequestSeq++;
-    const requestSeq = this.runtimesRequestSeq;
-    try {
-      const list = await this.devicesApi.listDeviceRuntimes(this.serverUrl(), this.token(), deviceId);
-      if (this.runtimesRequestSeq !== requestSeq) {
-        return;
-      }
-      this.runtimes = list.runtimes;
-      this.runtimesError = '';
-      this.runtimesLoading = false;
-    } catch (error) {
-      if (this.runtimesRequestSeq !== requestSeq) {
-        return;
-      }
-      this.runtimesError = errorMessageFrom(error as Object);
-      this.runtimesLoading = false;
-    }
-  }
-
-  // "Add runtime" entry: ask the connector to rescan, then list every
-  // available (present, possibly unconfigured) runtime in the expanded row.
-  private async discoverRuntimes(deviceId: string): Promise<void> {
-    if (this.discovering) {
-      return;
-    }
-    this.discovering = true;
-    this.runtimesRequestSeq++;
-    const requestSeq = this.runtimesRequestSeq;
-    try {
-      const list = await this.devicesApi.discoverDeviceRuntimes(this.serverUrl(), this.token(), deviceId);
-      if (this.runtimesRequestSeq === requestSeq) {
-        this.runtimes = list.runtimes;
-        this.runtimesError = '';
-        this.runtimesLoading = false;
-        showToast($r('app.string.devices_runtime_discover_done', list.runtimes.length));
-      }
-    } catch (error) {
-      if (this.runtimesRequestSeq === requestSeq) {
-        this.runtimesError = errorMessageFrom(error as Object);
-        this.runtimesLoading = false;
-      }
-    }
-    this.discovering = false;
-  }
-
-  private async toggleRuntimeActive(runtime: RemoteDeviceRuntime): Promise<void> {
-    if (this.runtimeBusyId.length > 0) {
-      return;
-    }
-    this.runtimeBusyId = runtime.runtimeId;
-    try {
-      await this.devicesApi.setDeviceRuntimeActive(this.serverUrl(), this.token(),
-        runtime.connectorId, runtime.runtimeId, !runtime.active);
-      await this.reloadRuntimes(runtime.connectorId);
-    } catch (error) {
-      showToast($r('app.string.devices_runtime_update_failed'));
-    }
-    this.runtimeBusyId = '';
-  }
-
-  private openConfigure(runtime: RemoteDeviceRuntime): void {
-    this.configureError = '';
-    this.configureSaving = false;
-    this.configureTarget = runtime;
-  }
-
-  private closeConfigure(): void {
-    if (this.configureSaving) {
-      return;
-    }
-    this.configureTarget = null;
-    this.configureError = '';
-  }
-
-  private async saveRuntimeConfig(config: Record<string, Object>): Promise<void> {
-    const target = this.configureTarget;
-    if (target === null || this.configureSaving) {
-      return;
-    }
-    this.configureSaving = true;
-    this.configureError = '';
-    try {
-      await this.devicesApi.putDeviceRuntimeConfig(this.serverUrl(), this.token(),
-        target.connectorId, target.runtimeId, config);
-      this.configureTarget = null;
-      showToast($r('app.string.devices_runtime_config_saved'));
-      await this.reloadRuntimes(target.connectorId);
-    } catch (error) {
-      this.configureError = errorMessageFrom(error as Object);
-    }
-    this.configureSaving = false;
-  }
-
-  private requestDeleteRuntime(runtime: RemoteDeviceRuntime): void {
-    this.pendingDeleteRuntime = runtime;
-    this.confirmDeleteRuntimeDialog.open();
-  }
-
-  private async deleteRuntime(runtime: RemoteDeviceRuntime): Promise<void> {
-    if (this.runtimeBusyId.length > 0) {
-      return;
-    }
-    this.runtimeBusyId = runtime.runtimeId;
-    try {
-      await this.devicesApi.deleteDeviceRuntimeConfig(this.serverUrl(), this.token(),
-        runtime.connectorId, runtime.runtimeId);
-      await this.reloadRuntimes(runtime.connectorId);
-    } catch (error) {
-      showToast($r('app.string.devices_runtime_delete_failed'));
-    }
-    this.pendingDeleteRuntime = null;
-    this.runtimeBusyId = '';
+    this.refreshPreviews();
   }
 
   private openPairing(): void {
     this.navPathStack.pushPathByName('pairing', '');
   }
 
-  private refreshAfterPairing(): void {
-    this.expandedId = '';
-    this.runtimes = [];
-    this.errorMessage = '';
-    this.loadDevices();
+  private openDevice(device: RemoteDevice): void {
+    this.navPathStack.pushPathByName('device_detail', device.id);
   }
 
-  private statusColor(status: string): string {
-    if (status === 'online') {
-      return getColors().runtimeRunning;
+  // --- Row colors (mirrors android DevicesScreen local palette) ------------
+
+  private rowTitleColor(): string {
+    if (this.themeIsDark) {
+      return '#DADADF';
+    }
+    return '#343436';
+  }
+
+  private rowMetaColor(): string {
+    if (this.themeIsDark) {
+      return getColors().muted;
+    }
+    return getColors().faint;
+  }
+
+  private rowBorderColor(): string {
+    if (this.themeIsDark) {
+      return getColors().border;
+    }
+    return '#ECECEC';
+  }
+
+  private iconBoxColor(): string {
+    if (this.themeIsDark) {
+      return '#27272A';
+    }
+    return '#F3F2EF';
+  }
+
+  private statusColor(device: RemoteDevice): string {
+    if (device.status === 'online') {
+      return '#10B981';
     }
     return getColors().muted;
   }
 
-  private formatTimestamp(value: string | null): string {
-    if (value === null || value.length < 16) {
-      return 'unknown';
+  // Mirrors android deviceKind: macos -> desktop, windows -> computer,
+  // linux/generic -> pc.
+  private deviceIcon(device: RemoteDevice): Resource {
+    const os = (device.deviceOs ?? '').toLowerCase();
+    if (os === 'macos') {
+      return $r('sys.symbol.desktop');
     }
-    return value.substring(0, 16).replace('T', ' ');
+    if (os === 'windows') {
+      return $r('sys.symbol.computer');
+    }
+    return $r('sys.symbol.pc');
+  }
+
+  // --- Builders --------------------------------------------------------------
+
+  @Builder
+  addDeviceRow() {
+    Row() {
+      Row() {
+        SymbolGlyph($r('sys.symbol.plus'))
+          .fontSize(22)
+          .fontColor([this.rowTitleColor()])
+      }
+      .width(42)
+      .height(42)
+      .borderRadius(12)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(VerticalAlign.Center)
+      .backgroundColor(this.iconBoxColor())
+
+      Text($r('app.string.devices_add_new'))
+        .fontSize(17)
+        .fontWeight(600)
+        .lineHeight(21)
+        .fontColor(this.rowTitleColor())
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .layoutWeight(1)
+        .margin({ left: 11 })
+
+      SymbolGlyph($r('sys.symbol.chevron_right'))
+        .fontSize(20)
+        .fontColor([getColors().faint])
+    }
+    .width('100%')
+    .height(60)
+    .padding({ left: 12, right: 8 })
+    .borderRadius(15)
+    .backgroundColor(getColors().raisedSurface)
+    .border({ width: 1, color: this.rowBorderColor() })
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => {
+      this.openPairing();
+    })
   }
 
   @Builder
-  runtimeRow(runtime: RemoteDeviceRuntime) {
-    Column({ space: 6 }) {
-      Row({ space: 8 }) {
-        Column({ space: 2 }) {
-          Text(runtime.displayName)
-            .fontSize(16.5)
-            .fontWeight(FontWeight.Bold)
-            .fontColor(getColors().ink)
-          Text(`${runtime.runtimeType} · ${runtime.status}`)
-            .fontSize(11.5)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(getColors().muted)
-        }
-        .alignItems(HorizontalAlign.Start)
-        .layoutWeight(1)
-        if (this.runtimeBusyId === runtime.runtimeId) {
-          LoadingProgress()
-            .width(14)
-            .height(14)
-        } else if (runtime.active) {
-          Text($r('app.string.devices_status_active'))
-            .fontSize(11)
-            .fontColor(getColors().primaryAction)
-            .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-            .borderRadius(8)
-            .backgroundColor(getColors().accentSurface)
-        } else if (runtime.present) {
-          Text($r('app.string.devices_status_present'))
-            .fontSize(11)
-            .fontColor(getColors().sessionStatusAccent)
-            .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-            .borderRadius(8)
-            .backgroundColor(getColors().successSurface)
-        } else {
-          Text($r('app.string.devices_status_absent'))
-            .fontSize(11)
-            .fontColor(getColors().muted)
-            .padding({ left: 8, right: 8, top: 2, bottom: 2 })
-            .borderRadius(8)
-            .backgroundColor(getColors().sessionCodeSurface)
-        }
+  deviceStatusLabel(device: RemoteDevice) {
+    Row({ space: 6 }) {
+      SymbolGlyph(device.status === 'online' ? $r('sys.symbol.checkmark_circle') : $r('sys.symbol.circle'))
+        .fontSize(16)
+        .fontColor([this.statusColor(device)])
+        .opacity(device.status === 'online' ? 1 : 0.4)
+      Text(device.status === 'online' ? $r('app.string.devices_online') : $r('app.string.devices_offline'))
+        .fontSize(13)
+        .fontWeight(FontWeight.Medium)
+        .lineHeight(16)
+        .fontColor(this.statusColor(device))
+        .maxLines(1)
+    }
+    .alignItems(VerticalAlign.Center)
+  }
+
+  @Builder
+  deviceRow(device: RemoteDevice) {
+    Row() {
+      Row() {
+        SymbolGlyph(this.deviceIcon(device))
+          .fontSize(22)
+          .fontColor([device.status === 'online' ? this.rowTitleColor() : getColors().muted])
       }
-      .width('100%')
-      if (runtime.configured) {
-        Row({ space: 6 }) {
-          Button(runtime.active ? $r('app.string.devices_runtime_deactivate') :
-            $r('app.string.devices_runtime_activate'))
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .height(34)
-            .borderRadius(6)
-            .backgroundColor(getColors().subtle)
-            .fontColor(getColors().ink)
-            .enabled(this.runtimeBusyId.length === 0 &&
-              (runtime.active || (runtime.present && runtime.configured)))
-            .onClick(() => {
-              this.toggleRuntimeActive(runtime);
-            })
-          Button($r('app.string.devices_runtime_configure'))
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .height(34)
-            .borderRadius(6)
-            .backgroundColor(getColors().subtle)
-            .fontColor(getColors().ink)
-            .enabled(this.runtimeBusyId.length === 0)
-            .onClick(() => {
-              this.openConfigure(runtime);
-            })
-          Button($r('app.string.devices_runtime_delete'))
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .height(34)
-            .borderRadius(6)
-            .backgroundColor(getColors().errorSurface)
-            .fontColor(getColors().errorText)
-            .enabled(this.runtimeBusyId.length === 0)
-            .onClick(() => {
-              this.requestDeleteRuntime(runtime);
-            })
+      .width(42)
+      .height(42)
+      .borderRadius(12)
+      .justifyContent(FlexAlign.Center)
+      .alignItems(VerticalAlign.Center)
+      .backgroundColor(this.iconBoxColor())
+
+      Column({ space: 3 }) {
+        Row({ space: 8 }) {
+          Text(device.name)
+            .fontSize(17)
+            .fontWeight(600)
+            .lineHeight(21)
+            .fontColor(device.status === 'online' ? this.rowTitleColor() : getColors().muted)
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis })
+            .constraintSize({ maxWidth: '68%' })
+          this.deviceStatusLabel(device)
         }
-        .width('100%')
-      } else if (runtime.present) {
-        Row({ space: 6 }) {
-          Button($r('app.string.devices_runtime_configure'))
-            .fontSize(14)
-            .fontWeight(FontWeight.Bold)
-            .height(34)
-            .borderRadius(6)
-            .backgroundColor(getColors().subtle)
-            .fontColor(getColors().ink)
-            .enabled(this.runtimeBusyId.length === 0)
-            .onClick(() => {
-              this.openConfigure(runtime);
-            })
-        }
-        .width('100%')
+        .alignItems(VerticalAlign.Center)
+
+        Text(this.previewLabel(device))
+          .fontSize(13)
+          .fontWeight(FontWeight.Medium)
+          .lineHeight(16)
+          .fontColor(this.rowMetaColor())
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
       }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+      .margin({ left: 11 })
+
+      SymbolGlyph($r('sys.symbol.chevron_right'))
+        .fontSize(20)
+        .fontColor([getColors().faint])
     }
     .width('100%')
-    .padding({ top: 6, bottom: 6 })
+    .height(60)
+    .padding({ left: 12, right: 8 })
+    .borderRadius(15)
+    .backgroundColor(getColors().raisedSurface)
+    .border({ width: 1, color: this.rowBorderColor() })
+    .alignItems(VerticalAlign.Center)
+    .onClick(() => {
+      this.openDevice(device);
+    })
   }
 
   build() {
     NavDestination() {
-      Stack() {
-        Column() {
-          if (this.errorMessage.length > 0) {
-          Text(this.errorMessage)
-            .fontSize(13.5)
-            .fontWeight(FontWeight.Medium)
-            .lineHeight(17)
-            .fontColor(getColors().errorText)
-            .width('100%')
-            .padding({ left: 16, right: 16, top: 4, bottom: 4 })
-        }
+      Column() {
         if (this.loading) {
           Column() {
             LoadingProgress()
@@ -515,188 +363,41 @@ export struct DevicesPage {
         } else {
           Refresh({ refreshing: $$this.refreshing }) {
             List({ space: 10 }) {
+              ListItem() {
+                this.addDeviceRow()
+              }
               if (this.devices.length === 0) {
                 ListItem() {
-                  Text($r('app.string.devices_no_devices'))
-                    .fontSize(16)
-                    .fontWeight(FontWeight.Medium)
-                    .lineHeight(21.5)
-                    .fontColor(getColors().inkSoft)
-                    .width('100%')
-                    .textAlign(TextAlign.Center)
-                    .padding({ top: 32, bottom: 32 })
-                }
-              }
-              ForEach(this.devices, (device: RemoteDevice) => {
-                ListItem() {
-                  Column({ space: 8 }) {
-                    Row({ space: 8 }) {
-                      Circle()
-                        .width(10)
-                        .height(10)
-                        .fill(this.statusColor(device.status))
-                      Text(device.name)
-                        .fontSize(17)
-                        .fontWeight(600)
-                        .lineHeight(21)
-                        .fontColor(getColors().inkSoft)
-                        .maxLines(1)
-                        .textOverflow({ overflow: TextOverflow.Ellipsis })
-                        .layoutWeight(1)
-                      Text(device.status)
-                        .fontSize(13)
+                  Column() {
+                    if (this.errorMessage.length > 0) {
+                      Text(this.errorMessage)
+                        .fontSize(16)
                         .fontWeight(FontWeight.Medium)
-                        .lineHeight(16)
-                        .fontColor(device.status === 'online' ? getColors().runtimeRunning : getColors().muted)
-                    }
-                    .width('100%')
-                    .onClick(() => {
-                      this.toggleExpanded(device.id);
-                    })
-                    Text(`${device.deviceOs ?? 'unknown OS'} · seen ${this.formatTimestamp(device.lastSeenAt)}`)
-                      .fontSize(13)
-                      .fontWeight(FontWeight.Medium)
-                      .lineHeight(16)
-                      .fontColor(getColors().faint)
-                      .width('100%')
-                    if (this.expandedId === device.id) {
-                      if (this.runtimesLoading) {
-                        LoadingProgress()
-                          .width(24)
-                          .height(24)
-                      } else if (this.runtimesError.length > 0) {
-                        Text(this.runtimesError)
-                          .fontSize(12.5)
-                          .fontWeight(600)
-                          .lineHeight(17)
-                          .fontColor(getColors().errorText)
-                      } else if (this.runtimes.length === 0) {
-                        Text($r('app.string.devices_no_runtimes'))
-                          .fontSize(13)
-                          .fontWeight(FontWeight.Medium)
-                          .lineHeight(17)
-                          .fontColor(getColors().muted)
-                      } else {
-                        ForEach(this.runtimes, (runtime: RemoteDeviceRuntime) => {
-                          this.runtimeRow(runtime)
-                        // Key includes displayed state so activate/deactivate
-                        // or reloaded runtime data rebuilds the row.
-                        }, (runtime: RemoteDeviceRuntime) =>
-                          `${runtime.runtimeId}_${runtime.displayName}_${runtime.status}_${runtime.active ? 1 : 0}_${runtime.present ? 1 : 0}_${runtime.configured ? 1 : 0}`)
-                      }
-                      if (this.discovering) {
-                        Row({ space: 8 }) {
-                          LoadingProgress()
-                            .width(16)
-                            .height(16)
-                          Text($r('app.string.devices_runtime_discovering'))
-                            .fontSize(12)
-                            .fontColor(getColors().muted)
-                        }
-                        .width('100%')
-                      }
-                      Button($r('app.string.devices_runtime_add'))
-                        .fontSize(14)
-                        .fontWeight(FontWeight.Bold)
-                        .height(34)
-                        .width('100%')
-                        .borderRadius(6)
-                        .backgroundColor(getColors().subtle)
-                        .fontColor(getColors().ink)
-                        .enabled(!this.discovering && !this.busy)
-                        .onClick(() => {
-                          this.discoverRuntimes(device.id);
-                        })
-                      if (this.renameTargetId === device.id) {
-                        Row({ space: 8 }) {
-                          TextInput({ text: this.renameInput, placeholder: $r('app.string.devices_rename_placeholder') })
-                            .fontSize(16)
-                            .fontWeight(FontWeight.Bold)
-                            .height(50)
-                            .layoutWeight(1)
-                            .borderRadius(12)
-                            .backgroundColor(getColors().subtle)
-                            .border({ width: 1, color: getColors().border })
-                            .fontColor(getColors().ink)
-                            .placeholderColor(getColors().faint)
-                            .onChange((value: string) => {
-                              this.renameInput = value;
-                            })
-                          Button($r('app.string.session_ok'))
-                            .fontSize(15)
-                            .fontWeight(FontWeight.Bold)
-                            .height(44)
-                            .borderRadius(22)
-                            .backgroundColor(getColors().primaryAction)
-                            .fontColor(getColors().onPrimaryAction)
-                            .enabled(!this.busy)
-                            .onClick(() => {
-                              this.confirmRename();
-                            })
-                          Button($r('app.string.devices_delete_cancel'))
-                            .fontSize(15)
-                            .fontWeight(FontWeight.Bold)
-                            .height(44)
-                            .borderRadius(22)
-                            .backgroundColor(getColors().secondaryActionSurface)
-                            .fontColor(getColors().ink)
-                            .border({ width: 1, color: getColors().border })
-                            .onClick(() => {
-                              this.cancelRename();
-                            })
-                        }
-                        .width('100%')
-                      } else {
-                        Row({ space: 8 }) {
-                          Button($r('app.string.devices_rename'))
-                            .fontSize(14)
-                            .fontWeight(FontWeight.Bold)
-                            .height(34)
-                            .borderRadius(6)
-                            .backgroundColor(getColors().subtle)
-                            .fontColor(getColors().ink)
-                            .onClick(() => {
-                              this.beginRename(device);
-                            })
-                          Button($r('app.string.devices_archive_all'))
-                            .fontSize(14)
-                            .fontWeight(FontWeight.Bold)
-                            .height(34)
-                            .borderRadius(6)
-                            .backgroundColor(getColors().subtle)
-                            .fontColor(getColors().ink)
-                            .enabled(!this.busy)
-                            .onClick(() => {
-                              this.requestArchiveAll(device);
-                            })
-                          Button($r('app.string.devices_delete_confirm'))
-                            .fontSize(14)
-                            .fontWeight(FontWeight.Bold)
-                            .height(34)
-                            .borderRadius(6)
-                            .backgroundColor(getColors().errorSurface)
-                            .fontColor(getColors().errorText)
-                            .enabled(!this.busy)
-                            .onClick(() => {
-                              this.requestDelete(device);
-                            })
-                        }
-                        .width('100%')
-                      }
+                        .lineHeight(21.5)
+                        .fontColor(getColors().inkSoft)
+                        .textAlign(TextAlign.Center)
+                    } else {
+                      Text($r('app.string.devices_no_devices'))
+                        .fontSize(16)
+                        .fontWeight(FontWeight.Medium)
+                        .lineHeight(21.5)
+                        .fontColor(getColors().inkSoft)
+                        .textAlign(TextAlign.Center)
                     }
                   }
                   .width('100%')
-                  .alignItems(HorizontalAlign.Start)
-                  .padding(12)
-                  .borderRadius(15)
-                  .backgroundColor(getColors().raisedSurface)
-                  .border({ width: 1, color: getColors().border })
+                  .padding({ top: 96, bottom: 96 })
+                  .alignItems(HorizontalAlign.Center)
                 }
-              // Key includes displayed fields so replacing an item (rename,
-              // refresh) rebuilds the row; a plain device.id key would keep
-              // the stale row until the page is re-entered.
+              }
+              ForEach(this.sortedDevices(), (device: RemoteDevice) => {
+                ListItem() {
+                  this.deviceRow(device)
+                }
+              // Key includes the preview count so loaded agent-status labels
+              // rebuild the row instead of keeping the stale "Loading" text.
               }, (device: RemoteDevice) =>
-                `${device.id}_${device.name}_${device.status}_${device.deviceOs ?? ''}_${device.lastSeenAt ?? ''}`)
+                `${device.id}_${device.name}_${device.status}_${this.previewCountFor(device.id)}`)
             }
             .width('100%')
             .layoutWeight(1)
@@ -708,34 +409,6 @@ export struct DevicesPage {
           .width('100%')
           .layoutWeight(1)
         }
-        Button($r('app.string.devices_pair'))
-          .fontSize(14)
-          .fontWeight(FontWeight.Bold)
-          .height(44)
-          .width('90%')
-          .borderRadius(22)
-          .backgroundColor(getColors().primaryAction)
-          .fontColor(getColors().onPrimaryAction)
-          .margin({ bottom: 16 })
-          .onClick(() => {
-            this.openPairing();
-          })
-        }
-        .width('100%')
-        .height('100%')
-        if (this.configureTarget !== null) {
-          RuntimeConfigureSheetOverlay({
-            runtime: this.configureTarget,
-            saving: this.configureSaving,
-            errorText: this.configureError,
-            onSave: (config: Record<string, Object>): void => {
-              this.saveRuntimeConfig(config);
-            },
-            onClose: (): void => {
-              this.closeConfigure();
-            }
-          })
-        }
       }
       .width('100%')
       .height('100%')
@@ -744,6 +417,13 @@ export struct DevicesPage {
     .onReady((ctx: NavDestinationContext) => {
       this.navPathStack = ctx.pathStack;
       this.loadDevices();
+    })
+    .onShown(() => {
+      if (this.shownOnce) {
+        this.loadDevices();
+      } else {
+        this.shownOnce = true;
+      }
     })
   }
 }

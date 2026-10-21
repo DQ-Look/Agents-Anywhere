@@ -76,9 +76,8 @@ export class FilesApi {
         entries.push(directoryEntry);
       }
     }
-    const pathValue = objGetOptString(resultRecord, 'path');
     const directory: RemoteDirectory = {
-      path: pathValue === null ? root : pathValue,
+      path: objGetString(resultRecord, 'path', root),
       entries: entries,
       truncated: objGetBool(resultRecord, 'truncated', false),
       targetType: objGetString(resultRecord, 'targetType', 'directory')

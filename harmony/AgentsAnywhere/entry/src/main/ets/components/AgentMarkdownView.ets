@@ -59,6 +59,14 @@ export struct AgentMarkdownView {
   @Prop codePanelColor: string = '';
   @Prop codePanelTextColor: string = '';
   @Prop fontSize: number = 17;
+  // Absolute content width cap in vp. -1 disables the cap. Percent-based
+  // maxWidth inside a constraintSize'd ancestor resolves against the window
+  // instead of the bubble, so chat bubbles must pass an explicit vp cap.
+  @Prop contentMaxWidthVp: number = -1;
+
+  private contentWidthCap(): number {
+    return this.contentMaxWidthVp > 0 ? this.contentMaxWidthVp : 100000;
+  }
 
   private isCompact(): boolean {
     return this.fontSize < 17;
@@ -263,9 +271,10 @@ export struct AgentMarkdownView {
           .layoutWeight(1)
       }, (cell: string, colIndex: number) => `${colIndex}_${mdTextHash(cell)}`)
     }
-    .width('100%')
-    .border({ width: { bottom: 1 }, color: getColors().border })
-    .backgroundColor(isHeader ? getColors().subtle : 'transparent')
+      .width('100%')
+      .constraintSize({ maxWidth: this.contentWidthCap() })
+      .border({ width: { bottom: 1 }, color: getColors().border })
+      .backgroundColor(isHeader ? getColors().subtle : 'transparent')
   }
 
   @Builder
@@ -275,7 +284,8 @@ export struct AgentMarkdownView {
         codeText: block.codeText,
         language: block.language,
         panelColor: this.resolvedCodePanelColor(),
-        panelTextColor: this.resolvedCodePanelTextColor()
+        panelTextColor: this.resolvedCodePanelTextColor(),
+        contentMaxWidthVp: this.contentMaxWidthVp
       })
     } else if (block.kind === 'heading') {
       Text() {
@@ -284,7 +294,7 @@ export struct AgentMarkdownView {
       .fontSize(this.headingFontSize(block.level))
       .lineHeight(this.headingLineHeight(block.level))
       .fontWeight(this.headingFontWeight())
-      .width('100%')
+      .constraintSize({ maxWidth: this.contentWidthCap() })
     } else if (block.kind === 'table') {
       if (block.table !== undefined) {
         Column() {
@@ -294,6 +304,7 @@ export struct AgentMarkdownView {
           }, (row: string[], rowIndex: number) => `${rowIndex}_${mdTextHash(row.join('|'))}`)
         }
         .width('100%')
+        .constraintSize({ maxWidth: this.contentWidthCap() })
         .border({ width: 1, color: getColors().border })
         .borderRadius(8)
       }
@@ -306,10 +317,12 @@ export struct AgentMarkdownView {
           inlineCodeColor: this.inlineCodeColor,
           codePanelColor: this.codePanelColor,
           codePanelTextColor: this.codePanelTextColor,
-          fontSize: this.fontSize
+          fontSize: this.fontSize,
+          contentMaxWidthVp: this.contentMaxWidthVp
         })
       }
       .width('100%')
+      .constraintSize({ maxWidth: this.contentWidthCap() })
       .alignItems(HorizontalAlign.Start)
       .padding({ left: 10, top: 2, bottom: 2 })
       .border({ width: { left: 2 }, color: getColors().border })
@@ -326,20 +339,23 @@ export struct AgentMarkdownView {
         .fontSize(this.fontSize)
         .lineHeight(this.bodyLineHeight())
         .layoutWeight(1)
+        .constraintSize({ maxWidth: this.contentWidthCap() })
       }
       .width('100%')
+      .constraintSize({ maxWidth: this.contentWidthCap() })
       .alignItems(VerticalAlign.Top)
     } else if (block.kind === 'rule') {
       Divider()
         .color(getColors().border)
         .width('100%')
+        .constraintSize({ maxWidth: this.contentWidthCap() })
     } else {
       Text() {
         this.spanContent(block.spans)
       }
       .fontSize(this.fontSize)
       .lineHeight(this.bodyLineHeight())
-      .width('100%')
+      .constraintSize({ maxWidth: this.contentWidthCap() })
     }
   }
 
@@ -349,7 +365,7 @@ export struct AgentMarkdownView {
         this.blockView(block, index)
       }, (block: MdBlock, index: number) => mdBlockKey(block, index))
     }
-    .width('100%')
+    .constraintSize({ maxWidth: this.contentWidthCap() })
     .alignItems(HorizontalAlign.Start)
   }
 }
@@ -361,6 +377,11 @@ export struct MdCodePanelView {
   @Prop language: string = '';
   @Prop panelColor: string = '';
   @Prop panelTextColor: string = '';
+  @Prop contentMaxWidthVp: number = -1;
+
+  private contentWidthCap(): number {
+    return this.contentMaxWidthVp > 0 ? this.contentMaxWidthVp : 100000;
+  }
   @State copied: boolean = false;
 
   private codeLabel(): string {
@@ -424,16 +445,17 @@ export struct MdCodePanelView {
           })
       }
       .width('100%')
+      .constraintSize({ maxWidth: this.contentWidthCap() })
       Text(this.codeText)
         .fontSize(12)
         .fontFamily('monospace')
         .fontColor(this.resolvedPanelTextColor())
-        .width('100%')
+        .constraintSize({ maxWidth: this.contentWidthCap() })
         .textAlign(TextAlign.Start)
         .copyOption(CopyOptions.InApp)
     }
     .width('100%')
-    .constraintSize({ minHeight: 112 })
+    .constraintSize({ maxWidth: this.contentWidthCap(), minHeight: 112 })
     .borderRadius(RadiusTokens.codePanel)
     .backgroundColor(this.resolvedPanelColor())
     .border({ width: this.themeIsDark ? 1 : 0, color: '#27272A' })

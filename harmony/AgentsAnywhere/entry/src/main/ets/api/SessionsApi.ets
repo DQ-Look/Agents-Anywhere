@@ -1,5 +1,5 @@
 import { ApiClient, FetchedFileData, UploadFilePart } from './ApiClient';
-import { objGetArray, objGetString, recordsFromArray, requireRecord } from '../common/Json';
+import { objGetArray, objGetRecord, objGetString, recordsFromArray, requireRecord } from '../common/Json';
 import { ApiException } from '../common/ApiException';
 import {
   parseRemoteCommandResult,
@@ -236,7 +236,12 @@ export class SessionsApi {
     sessionId: string): Promise<RemoteRuntimeCapabilitySet> {
     const response = await this.client.getJson(serverUrl,
       `/sessions/${encodeURIComponent(sessionId)}/runtime/capabilities`, authorizationToken);
-    return parseRemoteRuntimeCapabilitySet(response);
+    // The endpoint returns ProtocolCapabilitiesResponse
+    // { connectorId, capabilitySet: { revision, capabilities }, serverTime };
+    // unwrap the nested capability set before parsing (Android parity:
+    // payload.optJSONObject("capabilitySet")).
+    const capabilitySet = objGetRecord(response, 'capabilitySet');
+    return parseRemoteRuntimeCapabilitySet(capabilitySet !== null ? capabilitySet : response);
   }
 
   async createSessionShare(serverUrl: string, authorizationToken: string,

@@ -52,6 +52,15 @@ import {
 } from '../auth/HomeProjectPreferenceStore';
 import { ApiException, errorMessageFrom } from '../common/ApiException';
 import {
+  initialRemoteFilePath,
+  isHiddenFileEntryName,
+  isWindowsDeviceOs,
+  isWindowsDriveRootPath,
+  isWindowsDriveStylePath,
+  windowsDriveRootOf,
+  windowsParentPath
+} from '../common/FileViewSupport';
+import {
   RuntimePermissionStrings,
   LocalizedRuntimePermission,
   localizeRuntimePermission
@@ -361,6 +370,7 @@ export struct HomePage {
   @State projects: RemoteProject[] = [];
   @State homeDevices: RemoteDevice[] = [];
   @State homeDevicesLoaded: boolean = false;
+  @State agentGateState: string = 'checking';
   @State treeRows: HomeTreeRow[] = [];
   // Mirrors Android HomeProjectList's empty check: the account has no visible
   // project and no pinned session. Section collapse must NOT trigger the empty
@@ -429,6 +439,8 @@ export struct HomePage {
   @State actionBusy: boolean = false;
   private pageActive: boolean = false;
   private dashboardRetries: number = 0;
+  private agentGateSeq: number = 0;
+  private lastGateOnlineKey: string = '';
   private retryTimer: number = -1;
   private optCounter: number = 0;
   private authStore: AuthSessionStore = AuthSessionStore.getInstance();
@@ -461,6 +473,8 @@ export struct HomePage {
   private newSessionBrowserLoading: boolean = false;
   private newSessionBrowserError: string = '';
   private newSessionBrowserPath: string = '.';
+  private newSessionBrowserLastRequestPath: string = '.';
+  private newSessionBrowserRoot: string = '~';
   private newSessionBrowserEntries: RemoteDirectoryEntry[] = [];
   private socket: RealtimeWebSocket = new RealtimeWebSocket();
 
@@ -476,6 +490,7 @@ export struct HomePage {
     }).catch((): void => {
     });
     this.loadSessions();
+    this.loadAgentGate();
     this.connectDashboard();
     this.subscribeHoldingHand();
   }
@@ -631,6 +646,15 @@ export struct HomePage {
     this.hasLoaded = true;
     this.loading = false;
     this.refreshing = false;
+    const snapshotOnlineIds: string[] = [];
+    for (const device of snapshot.devices) {
+      if (device.status === 'online') {
+        snapshotOnlineIds.push(device.id);
+      }
+    }
+    if (snapshotOnlineIds.join(',') !== this.lastGateOnlineKey) {
+      this.loadAgentGate();
+    }
     this.rebuildProjectTree();
   }
 
@@ -1926,12 +1950,112 @@ export struct HomePage {
     this.errorMessage = '';
     this.loading = true;
     this.loadSessions();
+    this.loadAgentGate();
   }
 
   // The pairing prompt wins over the empty tree once devices are known to be
   // absent (Android HomeScreen's pairDeviceFirst state).
   private pairPromptVisible(): boolean {
     return this.homeDevicesLoaded && this.homeDevices.length === 0;
+  }
+
+  // Product decision (diverges from Android, which keeps listing server-side
+  // sessions): the home tree is gated on a running Agent. When every device is
+  // offline or no Agent is running, show setup guidance instead of the tree.
+  private async loadAgentGate(): Promise<void> {
+    const seq = ++this.agentGateSeq;
+    try {
+      const devices = await this.devicesApi.listDevices(this.serverUrl(), this.token());
+      if (!this.pageActive || seq !== this.agentGateSeq) {
+        return;
+      }
+      const onlineIds: string[] = [];
+      for (const device of devices) {
+        if (device.status === 'online') {
+          onlineIds.push(device.id);
+        }
+      }
+      this.lastGateOnlineKey = onlineIds.join(',');
+      if (devices.length === 0) {
+        this.agentGateState = 'no_devices';
+        return;
+      }
+      if (onlineIds.length === 0) {
+        this.agentGateState = 'devices_offline';
+        return;
+      }
+      let agentOnline = false;
+      for (const deviceId of onlineIds) {
+        try {
+          const list = await this.devicesApi.listDeviceRuntimes(this.serverUrl(), this.token(), deviceId);
+          if (runnableRuntimes(list.runtimes).length > 0) {
+            agentOnline = true;
+            break;
+          }
+        } catch (error) {
+          // One device's runtime list failing must not fail the whole gate.
+        }
+      }
+      if (!this.pageActive || seq !== this.agentGateSeq) {
+        return;
+      }
+      this.agentGateState = agentOnline ? 'ready' : 'no_agents';
+    } catch (error) {
+      if (!this.pageActive || seq !== this.agentGateSeq) {
+        return;
+      }
+      // Fail open: a gate check error must not hide the session tree.
+      this.agentGateState = 'ready';
+    }
+  }
+
+  @Builder
+  private agentGateContent() {
+    Column() {
+      if (this.agentGateState === 'devices_offline') {
+        Text('🔌')
+          .fontSize(40)
+        Text($r('app.string.new_session_devices_offline_title'))
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .lineHeight(21.5)
+          .fontColor(getColors().inkSoft)
+          .textAlign(TextAlign.Center)
+          .maxLines(3)
+          .constraintSize({ maxWidth: 294 })
+          .margin({ top: 10 })
+        Text($r('app.string.new_session_devices_offline_description'))
+          .fontSize(13)
+          .lineHeight(18)
+          .fontColor(getColors().faint)
+          .textAlign(TextAlign.Center)
+          .maxLines(4)
+          .constraintSize({ maxWidth: 294 })
+          .margin({ top: 6 })
+      } else {
+        Text('🤖')
+          .fontSize(40)
+        Text($r('app.string.new_session_setup_agent_title'))
+          .fontSize(16)
+          .fontWeight(FontWeight.Medium)
+          .lineHeight(21.5)
+          .fontColor(getColors().inkSoft)
+          .textAlign(TextAlign.Center)
+          .maxLines(3)
+          .constraintSize({ maxWidth: 294 })
+          .margin({ top: 10 })
+        Text($r('app.string.new_session_setup_agent_description'))
+          .fontSize(13)
+          .lineHeight(18)
+          .fontColor(getColors().faint)
+          .textAlign(TextAlign.Center)
+          .maxLines(4)
+          .constraintSize({ maxWidth: 294 })
+          .margin({ top: 6 })
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Center)
   }
 
   private treeHasContent(): boolean {
@@ -2001,6 +2125,15 @@ export struct HomePage {
 
   private async loadNewSessionDevices(): Promise<void> {
     this.newSessionSetupState = 'checking';
+    // A retry (Check again) must clear the previous selection: autoSelectDevice
+    // early-returns while selectedDeviceId is set, which would leave the sheet
+    // stuck in the checking state forever.
+    this.selectedDeviceId = '';
+    this.selectedRuntimeType = '';
+    this.selectedRuntimeId = '';
+    this.runtimes = [];
+    this.runtimesLoading = false;
+    this.newSessionRuntimeRequestSeq++;
     try {
       const devices = await this.devicesApi.listDevices(this.serverUrl(), this.token());
       if (!this.newSessionVisible) {
@@ -2142,6 +2275,8 @@ export struct HomePage {
     this.newSessionBrowserLoading = false;
     this.newSessionBrowserError = '';
     this.newSessionBrowserPath = '.';
+    this.newSessionBrowserLastRequestPath = '.';
+    this.newSessionBrowserRoot = '~';
     this.newSessionBrowserEntries = [];
     this.newSessionBrowserView = emptyNewSessionBrowserView();
   }
@@ -2660,10 +2795,24 @@ export struct HomePage {
     this.newSessionBrowserVisible = !this.newSessionBrowserVisible;
     if (this.newSessionBrowserVisible && this.newSessionBrowserEntries.length === 0 &&
       this.newSessionBrowserError.length === 0 && !this.newSessionBrowserLoading) {
-      this.loadNewSessionBrowserDirectory('.');
+      this.loadNewSessionBrowserDirectory(this.newSessionBrowserStartPath());
     } else {
       this.rebuildNewSessionBrowserView();
     }
+  }
+
+  private newSessionBrowserDevice(): RemoteDevice | null {
+    for (const device of this.devices) {
+      if (device.id === this.selectedDeviceId) {
+        return device;
+      }
+    }
+    return null;
+  }
+
+  private newSessionBrowserStartPath(): string {
+    const device = this.newSessionBrowserDevice();
+    return initialRemoteFilePath(device === null ? null : device.deviceOs);
   }
 
   private async loadNewSessionBrowserDirectory(path: string): Promise<void> {
@@ -2673,18 +2822,29 @@ export struct HomePage {
     }
     this.newSessionBrowserRequestSeq++;
     const seq = this.newSessionBrowserRequestSeq;
+    this.newSessionBrowserLastRequestPath = path;
     this.newSessionBrowserLoading = true;
     this.newSessionBrowserError = '';
     this.rebuildNewSessionBrowserView();
+    let requestPath = path;
+    let requestRoot = this.newSessionBrowserRoot;
+    if (isWindowsDriveStylePath(requestPath)) {
+      if (requestPath.length === 2) {
+        requestPath = `${requestPath}\\`;
+      }
+      requestRoot = windowsDriveRootOf(requestPath);
+    }
     try {
       const directory = await this.filesApi.listFiles(this.serverUrl(), this.token(),
-        deviceId, '~', path);
+        deviceId, requestRoot, requestPath);
       if (seq !== this.newSessionBrowserRequestSeq) {
         return;
       }
+      const device = this.newSessionBrowserDevice();
+      const windowsDevice = device !== null && isWindowsDeviceOs(device.deviceOs);
       const directories: RemoteDirectoryEntry[] = [];
       for (const entry of directory.entries) {
-        if (entry.type === 'directory') {
+        if (entry.type === 'directory' && !isHiddenFileEntryName(entry.name, windowsDevice)) {
           directories.push(entry);
         }
       }
@@ -2693,6 +2853,9 @@ export struct HomePage {
       });
       this.newSessionBrowserEntries = directories;
       this.newSessionBrowserPath = directory.path;
+      if (isWindowsDriveStylePath(this.newSessionBrowserPath)) {
+        this.newSessionBrowserRoot = windowsDriveRootOf(this.newSessionBrowserPath);
+      }
     } catch (error) {
       if (seq !== this.newSessionBrowserRequestSeq) {
         return;
@@ -2719,19 +2882,33 @@ export struct HomePage {
 
   private newSessionBrowserCanGoUp(): boolean {
     const path = this.newSessionBrowserPath;
-    return path.length > 0 && path !== '.' && path !== '/' && path !== '~';
+    if (path.length === 0) {
+      return false;
+    }
+    if (isWindowsDriveStylePath(path)) {
+      return true;
+    }
+    return path !== '.' && path !== '/' && path !== '~';
   }
 
   private goNewSessionBrowserUp(): void {
     if (!this.newSessionBrowserCanGoUp() || this.creatingSession) {
       return;
     }
+    const path = this.newSessionBrowserPath;
+    if (isWindowsDriveRootPath(path)) {
+      this.loadNewSessionBrowserDirectory('');
+      return;
+    }
+    if (isWindowsDriveStylePath(path)) {
+      this.loadNewSessionBrowserDirectory(windowsParentPath(path));
+      return;
+    }
     this.loadNewSessionBrowserDirectory(this.newSessionBrowserParentPath());
   }
 
   private retryNewSessionBrowser(): void {
-    const path = this.newSessionBrowserPath.length === 0 ? '.' : this.newSessionBrowserPath;
-    this.loadNewSessionBrowserDirectory(path);
+    this.loadNewSessionBrowserDirectory(this.newSessionBrowserLastRequestPath);
   }
 
   private useNewSessionBrowserDirectory(): void {
@@ -3554,7 +3731,7 @@ export struct HomePage {
             .width('100%')
         }
         Stack({ alignContent: Alignment.BottomEnd }) {
-          if (this.loading && !this.hasLoaded) {
+          if ((this.loading || this.agentGateState === 'checking') && !this.hasLoaded) {
             Column() {
               LoadingProgress()
                 .width(44)
@@ -3575,6 +3752,23 @@ export struct HomePage {
             .width('100%')
             .height('100%')
             .justifyContent(FlexAlign.Center)
+          } else if (this.agentGateState === 'devices_offline' || this.agentGateState === 'no_agents') {
+            Refresh({ refreshing: $$this.refreshing }) {
+              Column() {
+                this.agentGateContent()
+              }
+              .width('100%')
+              .height('100%')
+              .justifyContent(FlexAlign.Center)
+            }
+            .onRefreshing(() => {
+              this.loadSessions();
+              this.loadAgentGate();
+              this.dashboardRetries = 0;
+              this.connectDashboard();
+            })
+            .width('100%')
+            .height('100%')
           } else if (this.pairPromptVisible()) {
             Column() {
               EmptyState({
@@ -3610,6 +3804,7 @@ export struct HomePage {
             }
             .onRefreshing(() => {
               this.loadSessions();
+              this.loadAgentGate();
               this.dashboardRetries = 0;
               this.connectDashboard();
             })
