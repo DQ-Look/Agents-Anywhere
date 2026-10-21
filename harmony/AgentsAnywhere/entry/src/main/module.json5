@@ -25,8 +25,8 @@
         "name": "ohos.permission.VIBRATE"
       },
       {
-        "name": "ohos.permission.DETECT_GESTURE",
-        "reason": "$string:gesture_detection_reason",
+        "name": "ohos.permission.ACTIVITY_MOTION",
+        "reason": "$string:operating_hand_reason",
         "usedScene": {
           "abilities": [
             "EntryAbility"

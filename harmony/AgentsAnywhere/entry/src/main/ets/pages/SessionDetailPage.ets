@@ -1378,15 +1378,22 @@ export struct SessionDetailPage {
     const pickerProfile: cameraPicker.PickerProfile = {
       cameraPosition: camera.CameraPosition.CAMERA_POSITION_BACK
     };
-    cameraPicker.pick(getContext(this), [cameraPicker.PickerMediaType.PHOTO], pickerProfile)
-      .then((result: cameraPicker.PickerResult) => {
-        if (result.resultCode !== 0 || result.resultUri.length === 0) {
-          return;
-        }
-        // The captured photo reuses the exact same upload path as gallery
-        // picks, so no upload logic is duplicated here.
-        this.uploadLocalUris([result.resultUri]);
-      })
+    // On camera-less devices (e.g. emulators) the syscap stub returns
+    // undefined instead of a Promise; without the guard the .then below
+    // crashes the page ("Cannot read property then of undefined").
+    const picked: Promise<cameraPicker.PickerResult> | undefined =
+      cameraPicker.pick(getContext(this), [cameraPicker.PickerMediaType.PHOTO], pickerProfile);
+    if (picked === undefined) {
+      return;
+    }
+    picked.then((result: cameraPicker.PickerResult) => {
+      if (result.resultCode !== 0 || result.resultUri.length === 0) {
+        return;
+      }
+      // The captured photo reuses the exact same upload path as gallery
+      // picks, so no upload logic is duplicated here.
+      this.uploadLocalUris([result.resultUri]);
+    })
       .catch(() => {
         // User closed the camera or no camera is available — stay silent.
       });
