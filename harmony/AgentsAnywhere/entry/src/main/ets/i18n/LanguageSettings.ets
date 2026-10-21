@@ -29,11 +29,18 @@ export type AppLanguageMode = 'system' | 'zh_CN' | 'en';
 export const APP_LANGUAGE_KEY: string = 'appLanguage';
 const PREF_NAME: string = 'app-language';
 const LOG_TAG: string = 'AgentsAnywhere.Language';
+// Applying a new preferred language re-renders the whole visible page tree.
+// Deferring the system call lets the row-tap feedback finish its frame first.
+const INTERACTIVE_APPLY_DELAY_MS: number = 300;
 
 export class LanguageSettings {
   private static instance: LanguageSettings | null = null;
   private store: preferences.Preferences | null = null;
   private readyPromise: Promise<void> | null = null;
+  // Locale last pushed to the system; guards against the re-entrant chain
+  // setAppPreferredLanguage -> onConfigurationUpdate -> loadAndApply ->
+  // setAppPreferredLanguage, which caused repeated full-tree re-renders.
+  private lastAppliedLocale: string | null = null;
 
   static getInstance(): LanguageSettings {
     if (LanguageSettings.instance === null) {
@@ -82,8 +89,9 @@ export class LanguageSettings {
   }
 
   /**
-   * Persist a new choice and apply it immediately. Returns the applied mode.
-   * Called from the Profile language switcher.
+   * Persist a new choice and apply it. The persisted value and AppStorage are
+   * updated immediately so the selected row reacts in the same frame; only the
+   * system-level apply is deferred. Called from the Profile language switcher.
    */
   async setLanguage(mode: AppLanguageMode): Promise<AppLanguageMode> {
     const store = this.store;
@@ -97,7 +105,7 @@ export class LanguageSettings {
       }
     }
     AppStorage.setOrCreate<string>(APP_LANGUAGE_KEY, mode);
-    this.applyToSystem(mode);
+    this.applyToSystem(mode, INTERACTIVE_APPLY_DELAY_MS);
     return mode;
   }
 
@@ -105,19 +113,34 @@ export class LanguageSettings {
    * Push the choice to the HarmonyOS i18n subsystem so that qualifier-based
    * string resources resolve to the right language bundle.
    * Passing 'default' clears the override and lets the system language win.
+   * Already-applied locales are skipped to avoid redundant configuration
+   * changes and their full-tree re-renders.
    */
-  private applyToSystem(mode: AppLanguageMode): void {
+  private applyToSystem(mode: AppLanguageMode, delayMs: number = 0): void {
     let locale: string = 'default';
     if (mode === 'zh_CN') {
       locale = 'zh-CN';
     } else if (mode === 'en') {
       locale = 'en';
     }
-    try {
-      i18n.System.setAppPreferredLanguage(locale);
-    } catch (err) {
-      hilog.error(0x0000, LOG_TAG, 'setAppPreferredLanguage failed: %{public}s',
-        (err as Error).message);
+    if (this.lastAppliedLocale === locale) {
+      return;
+    }
+    this.lastAppliedLocale = locale;
+    const apply = (): void => {
+      try {
+        i18n.System.setAppPreferredLanguage(locale);
+      } catch (err) {
+        // Undo the guard so a later attempt can retry.
+        this.lastAppliedLocale = null;
+        hilog.error(0x0000, LOG_TAG, 'setAppPreferredLanguage failed: %{public}s',
+          (err as Error).message);
+      }
+    };
+    if (delayMs > 0) {
+      setTimeout(apply, delayMs);
+    } else {
+      apply();
     }
   }
 }
