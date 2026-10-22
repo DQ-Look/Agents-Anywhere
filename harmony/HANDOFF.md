@@ -41,7 +41,7 @@
 4. 文件浏览：无重命名/上传/下载（根路径切换已完成）
 5. 设备管理：配对流程仅占位（未做 create device + token 展示 / pair-code claim）
 6. 首页会话列表未接 dashboard 实时刷新；创建会话入口为底部 Sheet（已做，是否与 Android 完全一致待 UI 验证）
-7. 未在真机/模拟器做过 UI 验证（仅 headless build）；深色模式重渲染未订阅 APP_IS_DARK_KEY（全端既有缺口）
+7. 模拟器 UI 验证已大量完成（API 26 Mate 80 + API 13 Phone API13，见 hmo-vs-android-gap-list.md 与本文档验收记录）；真机（尤其 API 12 最低版本设备）未验证；深色模式重渲染已在 P2 补齐 @StorageProp
 8. 客户端自动更新：downloadUpdate 目前用 context.openLink(downloadUrl) 兜底，未做真实下载/安装
 
 ## 本次适配（API 12+）
@@ -62,6 +62,18 @@
   - 根因：setLanguage 同步调 `i18n.System.setAppPreferredLanguage` → 整棵可见页面树同帧重建；且语言变更触发 EntryAbility.onConfigurationUpdate → loadAndApply → 再次 setAppPreferredLanguage，造成重复配置变更/重渲染。
   - 修复：① `lastAppliedLocale` 守卫，已应用过的 locale 直接跳过，阻断回环；② 交互路径 `setLanguage` 只延迟 300ms 应用系统语言（persist + AppStorage 选中态仍即时更新，勾选行当帧响应）。
   - 未在真机实测帧率，构建已通过。
+
+## API 13 模拟器验收（compatibleSdkVersion 附近实测）
+- **镜像情况**：华为模拟器镜像目录最低 **API 13（HarmonyOS 5.0.1）**，API 12 无镜像可下载——API 12 只能真机验证。本机已下载 API 13 镜像，创建实例 "Phone API13"（127.0.0.1:5557）。
+- **实测结论**（本地签名 HAP，devecocli build SUCCESSFUL 后部署）：
+  - 安装成功（compatibleSdkVersion 5.0.0(12) 的 HAP 可装 API 13）✓；启动正常，全程 **3 次崩溃日志检查均无 jscrash** ✓
+  - OAuth Web 登录全链路通过（PKCE WebView → 回调 → token 交换 → 进入主页）✓
+  - 主页项目树（Agents-Anywhere / 11 / dsit-v2.0r00f00）、项目行点击原地展开会话列表 ✓
+  - 设备页（工作笔记本在线 "1 个 Agent 在线"、DESKTOP-BO6LFMF 离线、添加新设备行）✓
+  - 文件页（工作笔记本 → 这台电脑 → C:/D:/E: 盘符列表）✓
+  - 会话详情页（Timeline 消息、"推理了 37 次, 执行了 62 次工具" 组摘要、DSH · idle + live 徽章、Load earlier messages、接管按钮）✓
+- **未覆盖**：PATCH 降级路径（API 13 上 `http.RequestMethod.PATCH` 已存在，不触发 fallback，需 API 12 真机）；API 12 安装/运行（无镜像无设备）。
+- **API 13 工具坑（供后续验收复用）**：`snapshot_display` 不支持 `-t` 参数（devecocli ui screenshot 失败）且**只接受 `.jpeg` 后缀**（`.png` 报 invalid suffix）；devecocli `ui layout` 在 API 13 上 dump 失败（ENOENT），改用 `hdc shell uitest dumpLayout -p <path>` 导出无障碍布局树后 `file recv` 拉回解析，节点带 bounds 坐标，可精准驱动点击。
 
 ## 本次补齐（P2）
 - **暗色模式重渲染**：getColors() 原本以非响应式方式读 AppStorage，没有任何 @Component 订阅 APP_IS_DARK_KEY，导致系统/手动切换主题时页面不重绘。已在 14 个文件、17 个 struct 上加 @StorageProp(APP_IS_DARK_KEY) themeIsDark: boolean = false;（ConfirmDialog 是 @CustomDialog，不支持该装饰器，已跳过——dialog 在 open() 时重建，仍通过 getColors() 生效）。EntryAbility 的 onConfigurationUpdate→syncTheme 已正确维护该 key。
