@@ -280,6 +280,7 @@ export struct SessionDetailPage {
   private optCounter: number = 0;
   private navPathStack: NavPathStack = new NavPathStack();
   private scroller: Scroller = new Scroller();
+  private initialBottomScrollDone: boolean = false;
   private socket: RealtimeWebSocket = new RealtimeWebSocket();
   private networkMonitor: NetworkMonitor = new NetworkMonitor();
   private draftStore: ComposerDraftStore = ComposerDraftStore.getInstance();
@@ -1512,6 +1513,14 @@ export struct SessionDetailPage {
     }, 120);
   }
 
+  private initialTimelineIndex(): number {
+    if (this.sections.length === 0) {
+      return 0;
+    }
+    const headerItems = this.hasMoreHistory ? 1 : 0;
+    return headerItems + this.sections.length - 1;
+  }
+
   private rememberProcessedEvent(eventId: string): boolean {
     if (this.processedEventIdSet.has(eventId)) {
       return false;
@@ -2498,7 +2507,7 @@ export struct SessionDetailPage {
           .layoutWeight(1)
           .justifyContent(FlexAlign.Center)
         } else {
-          List({ space: 16, scroller: this.scroller }) {
+          List({ space: 16, scroller: this.scroller, initialIndex: this.initialTimelineIndex() }) {
             if (this.hasMoreHistory) {
               ListItem() {
                 Button(this.historyButtonLabel())
@@ -2561,6 +2570,13 @@ export struct SessionDetailPage {
           .width('100%')
           .layoutWeight(1)
           .padding({ left: 20, right: 20, top: 4 })
+          .onAppear(() => {
+            if (this.initialBottomScrollDone) {
+              return;
+            }
+            this.initialBottomScrollDone = true;
+            this.scroller.scrollEdge(Edge.Bottom);
+          })
         }
         if (this.commandSuggestions.length > 0) {
           Column() {
