@@ -16,7 +16,7 @@ Agents Anywhere 是一个跨设备的 Agent 工作台。工作设备上的 **Con
 | `desktop-workbench/` | **当前**桌面客户端，内含受管理的本机 Connector | Electron、TypeScript、Yarn |
 | `android/` | Android 客户端，见 `android/ARCHITECTURE.md` | Kotlin、Gradle、JDK 17 |
 | `ios/` | iOS / iPadOS 客户端，见 `ios/ARCHITECTURE.md` | Swift、Xcode |
-| `harmony/` | 鸿蒙（HarmonyOS / ArkTS）客户端，工程在 `harmony/AgentsAnywhere`（bundle `com.agentsanywhere.app`，兼容 API 12+ / target API 26） | ArkTS、DevEco Studio / devecocli |
+| `harmony/` | 鸿蒙（HarmonyOS / ArkTS）客户端：**已迁移至独立仓库 [agents-anywhere-harmony](https://github.com/DQ-Look/agents-anywhere-harmony)**（bundle `com.agentsanywhere.app`，兼容 API 12+ / target API 26，拆分为 common/network/session/terminal/files/entry 六模块，CI 出 unsigned HAP）。本目录为迁移前的探索开发快照，仅作参考，不再开发 | ArkTS、DevEco Studio / devecocli |
 | `dsh-bridge-next/` | **当前** DSH 插件（npm 包，也随 DSH Desktop 分发） | TypeScript、Yarn |
 | `contracts/` | 跨端契约与 fixtures，按 `<name>/<version>/` 组织 | JSON Schema / 文档 |
 | `docker/` | 自托管部署与本地数据库 compose | Docker Compose |
