@@ -53,6 +53,7 @@ _reference/*
 .hvigor/
 .hvigorw
 *.profraw
+.cache/
 
 # JetBrains IDEs
 .idea/
