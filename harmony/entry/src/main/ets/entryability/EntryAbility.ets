@@ -16,6 +16,12 @@
 import { AbilityConstant, Configuration, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { AuthSessionStore } from 'session';
+import { AnnouncementReadStore } from 'session';
+import { AppUpdateIgnoreStore } from 'session';
+import { NewSessionPreferenceStore } from 'session';
+import { SidebarViewModeStore } from 'session';
+import { ComposerDraftStore } from 'session';
 import { APP_IS_DARK_KEY, APP_MODE_KEY } from 'common';
 import { AppearanceSettings } from 'common';
 import { LanguageSettings } from 'common';
@@ -84,6 +90,13 @@ export default class EntryAbility extends UIAbility {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
+    AuthSessionStore.getInstance().init(this.context);
+    AnnouncementReadStore.getInstance().init(this.context);
+    AppUpdateIgnoreStore.getInstance().init(this.context);
+    NewSessionPreferenceStore.getInstance().init(this.context);
+    SidebarViewModeStore.getInstance().init(this.context);
+    ComposerDraftStore.getInstance().init(this.context);
+    SidebarViewModeStore.getInstance().loadAndApply();
     // Ensure the resolved theme flag matches the system when following it.
     this.syncTheme();
     windowStage.loadContent('pages/Index', (err) => {

@@ -61,6 +61,18 @@
           ]
         }
       ]
+    },
+    {
+      "name": "session",
+      "srcPath": "./session",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
     }
   ]
 }
