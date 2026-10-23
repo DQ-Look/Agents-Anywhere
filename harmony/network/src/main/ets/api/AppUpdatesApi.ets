@@ -7,8 +7,9 @@ export interface AppRelease {
   downloadUrl: string;
 }
 
-// Replace this placeholder with the fixed package address before distribution.
-export const UPDATE_DOWNLOAD_URL = 'https://downloads.example.invalid/agents-anywhere.hap';
+// The in-app update action opens this page via openLink; replace it with the
+// fixed package address once the HarmonyOS build is published (e.g. AppGallery).
+export const UPDATE_DOWNLOAD_URL = 'https://agents-anywhere.com/download';
 
 interface ParsedUpdateVersion {
   release: number[];
