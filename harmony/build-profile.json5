@@ -73,6 +73,30 @@
           ]
         }
       ]
+    },
+    {
+      "name": "terminal",
+      "srcPath": "./terminal",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "files",
+      "srcPath": "./files",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
     }
   ]
 }
