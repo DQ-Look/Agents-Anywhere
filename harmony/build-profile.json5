@@ -49,6 +49,18 @@
           ]
         }
       ]
+    },
+    {
+      "name": "network",
+      "srcPath": "./network",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
     }
   ]
 }
